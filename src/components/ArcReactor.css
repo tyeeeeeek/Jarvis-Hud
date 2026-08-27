@@ -277,8 +277,8 @@ html, body, #root {
 .hud-widget {
   position: fixed;
   z-index: 100;
-  min-width: 155px;
-  padding: 14px 16px 13px;
+  min-width: 210px;
+  padding: 18px 22px 17px;
   border-radius: 3px;
   background: rgba(0,4,12,0.80);
   border: 1px solid rgba(0,240,255,0.18);
@@ -320,61 +320,61 @@ html, body, #root {
   50% { box-shadow: 0 0 24px rgba(0,240,255,0.11), inset 0 0 24px rgba(0,0,0,0.5); opacity: 1; }
 }
 
-.w-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
-.w-label { font-family: monospace; font-size: 9px; letter-spacing: 3px; color: rgba(0,240,255,0.55); text-transform: uppercase; }
-.w-sublabel { font-family: monospace; font-size: 8px; letter-spacing: 2px; color: rgba(0,240,255,0.28); }
-.w-divider { height: 1px; background: linear-gradient(90deg,transparent,rgba(0,240,255,0.12),transparent); margin: 8px 0; }
-.w-row { display: flex; align-items: flex-end; gap: 10px; margin: 4px 0; }
+.w-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+.w-label { font-family: monospace; font-size: 12px; letter-spacing: 3px; color: rgba(0,240,255,0.55); text-transform: uppercase; }
+.w-sublabel { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.28); }
+.w-divider { height: 1px; background: linear-gradient(90deg,transparent,rgba(0,240,255,0.12),transparent); margin: 10px 0; }
+.w-row { display: flex; align-items: flex-end; gap: 12px; margin: 6px 0; }
 .w-row--bottom { align-items: flex-end; }
 .w-row--spread { justify-content: space-between; align-items: center; }
-.w-stat { display: flex; flex-direction: column; gap: 2px; }
-.w-stat-lbl { font-family: monospace; font-size: 8px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
-.w-stat-val { font-family: monospace; font-size: 12px; letter-spacing: 1px; color: rgba(0,240,255,0.85); }
-.w-error { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(255,90,90,0.75); display: block; margin-top: 4px; }
-.w-loading { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.4); display: block; margin-top: 4px; animation: wBlink 1.2s ease-in-out infinite; }
-.w-idle { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.35); display: block; margin-top: 4px; }
+.w-stat { display: flex; flex-direction: column; gap: 3px; }
+.w-stat-lbl { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
+.w-stat-val { font-family: monospace; font-size: 15px; letter-spacing: 1px; color: rgba(0,240,255,0.85); }
+.w-error { font-family: monospace; font-size: 12px; letter-spacing: 2px; color: rgba(255,90,90,0.75); display: block; margin-top: 5px; }
+.w-loading { font-family: monospace; font-size: 12px; letter-spacing: 2px; color: rgba(0,240,255,0.4); display: block; margin-top: 5px; animation: wBlink 1.2s ease-in-out infinite; }
+.w-idle { font-family: monospace; font-size: 12px; letter-spacing: 2px; color: rgba(0,240,255,0.35); display: block; margin-top: 5px; }
 @keyframes wBlink { 0%,100%{opacity:0.3;} 50%{opacity:1;} }
 
-.w-temp { font-family: monospace; font-size: 40px; font-weight: 300; letter-spacing: -2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.45); }
-.w-cond-block { display: flex; flex-direction: column; gap: 3px; padding-bottom: 5px; }
-.w-cond { font-family: monospace; font-size: 11px; letter-spacing: 1.5px; color: rgba(0,240,255,0.75); }
-.w-feels { font-family: monospace; font-size: 9px; letter-spacing: 1px; color: rgba(0,240,255,0.38); }
-.w-aqi { font-family: monospace; font-size: 10px; letter-spacing: 1px; }
+.w-temp { font-family: monospace; font-size: 52px; font-weight: 300; letter-spacing: -2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.45); }
+.w-cond-block { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; }
+.w-cond { font-family: monospace; font-size: 14px; letter-spacing: 1.5px; color: rgba(0,240,255,0.75); }
+.w-feels { font-family: monospace; font-size: 11px; letter-spacing: 1px; color: rgba(0,240,255,0.38); }
+.w-aqi { font-family: monospace; font-size: 12px; letter-spacing: 1px; }
 
 .w-fin-connect {
-  font-family: monospace; font-size: 10px; letter-spacing: 1.5px;
+  font-family: monospace; font-size: 12px; letter-spacing: 1.5px;
   background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.35);
-  color: rgba(0,240,255,0.85); padding: 8px 10px; border-radius: 3px;
+  color: rgba(0,240,255,0.85); padding: 10px 12px; border-radius: 3px;
   cursor: pointer; width: 100%; text-align: center;
 }
 .w-fin-connect:hover { background: rgba(0,240,255,0.16); }
 .w-fin-connect:disabled { opacity: 0.5; cursor: default; }
 .w-fin-disconnect {
-  font-family: monospace; font-size: 8px; letter-spacing: 1.5px;
+  font-family: monospace; font-size: 10px; letter-spacing: 1.5px;
   background: transparent; border: none; color: rgba(255,90,90,0.55);
   cursor: pointer; padding: 0; text-align: left;
 }
 .w-fin-disconnect:hover { color: rgba(255,90,90,0.85); }
 
-.w-clock-row { margin: 5px 0 3px; }
-.w-clock { font-family: monospace; font-size: 30px; font-weight: 300; letter-spacing: 2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.4); }
-.w-weekday { font-family: monospace; font-size: 10px; letter-spacing: 3px; color: rgba(0,240,255,0.65); margin-top: 4px; }
-.w-date { font-family: monospace; font-size: 9px; letter-spacing: 2px; color: rgba(0,240,255,0.38); margin-top: 2px; }
+.w-clock-row { margin: 6px 0 4px; }
+.w-clock { font-family: monospace; font-size: 40px; font-weight: 300; letter-spacing: 2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.4); }
+.w-weekday { font-family: monospace; font-size: 12px; letter-spacing: 3px; color: rgba(0,240,255,0.65); margin-top: 5px; }
+.w-date { font-family: monospace; font-size: 11px; letter-spacing: 2px; color: rgba(0,240,255,0.38); margin-top: 3px; }
 
 /* ── Jarvis console ────────────────────────────────────────────────────── */
-.w-jarvis-console { display: flex; flex-direction: column; gap: 6px; min-width: 220px; max-width: 260px; }
-.w-jc-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.w-jarvis-console { display: flex; flex-direction: column; gap: 8px; min-width: 280px; max-width: 340px; }
+.w-jc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .w-jc-dot--on { background: #00f0ff; box-shadow: 0 0 6px #00f0ff; animation: jcPulse 2.5s ease-in-out infinite; }
 .w-jc-dot--off { background: rgba(255,80,60,0.6); box-shadow: 0 0 4px rgba(255,80,60,0.4); }
 @keyframes jcPulse { 0%,100% { box-shadow: 0 0 3px #00f0ff; } 50% { box-shadow: 0 0 10px #00f0ff; opacity: 0.8; } }
-.w-jc-status { font-family: monospace; font-size: 11px; letter-spacing: 2px; color: rgba(0,240,255,0.85); text-shadow: 0 0 8px rgba(0,240,255,0.35); margin-bottom: 2px; }
-.w-jc-log { display: flex; flex-direction: column; gap: 6px; max-height: 168px; overflow-y: auto; padding-right: 2px; }
+.w-jc-status { font-family: monospace; font-size: 14px; letter-spacing: 2px; color: rgba(0,240,255,0.85); text-shadow: 0 0 8px rgba(0,240,255,0.35); margin-bottom: 3px; }
+.w-jc-log { display: flex; flex-direction: column; gap: 8px; max-height: 210px; overflow-y: auto; padding-right: 3px; }
 .w-jc-log::-webkit-scrollbar { width: 4px; }
 .w-jc-log::-webkit-scrollbar-thumb { background: rgba(0,240,255,0.18); border-radius: 2px; }
 .w-jc-row { display: flex; flex-direction: column; gap: 1px; animation: jcRowIn 0.18s ease-out; }
 @keyframes jcRowIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
-.w-jc-tag { font-family: monospace; font-size: 7px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
-.w-jc-text { font-family: monospace; font-size: 10px; letter-spacing: 0.5px; color: rgba(0,240,255,0.75); line-height: 1.4; word-break: break-word; }
+.w-jc-tag { font-family: monospace; font-size: 9px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
+.w-jc-text { font-family: monospace; font-size: 12px; letter-spacing: 0.5px; color: rgba(0,240,255,0.75); line-height: 1.4; word-break: break-word; }
 .w-jc-row--activity .w-jc-tag, .w-jc-row--activity .w-jc-text { color: rgba(0,240,255,0.45); font-style: italic; }
 
 /* ── Status-driven reactor coloring ───────────────────────────────────── */
