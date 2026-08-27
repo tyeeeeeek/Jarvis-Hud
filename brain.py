@@ -89,6 +89,20 @@ _CAPTION_OVERRIDES = {
     "check_disk_space": lambda a: "Checking disk space",
     "clean_disk": lambda a: "Cleaning up disk space",
     "media_control": lambda a: "Adjusting playback",
+    "close_browser": lambda a: "Closing the browser",
+    "run_diagnostic_command": lambda a: f"Running {a.get('command', 'that')} diagnostic",
+    "get_financial_insights": lambda a: "Pulling together financial insights",
+    "get_nas_status": lambda a: "Checking the NAS",
+    "check_internet_speed": lambda a: "Running a speed test -- this takes a bit",
+    "scan_network": lambda a: "Scanning the network",
+    "get_tailscale_status": lambda a: "Checking the tailnet",
+    "tailscale_ping": lambda a: f"Pinging {a.get('device', 'that')} over Tailscale",
+    "set_tailscale_exit_node": lambda a: "Changing the exit node",
+    "tailscale_connect": lambda a: "Connecting Tailscale",
+    "tailscale_disconnect": lambda a: "Disconnecting Tailscale",
+    "build_finance_dashboard": lambda a: "Building your finance dashboard",
+    "hire_employee": lambda a: f"Putting a {a.get('role', 'someone')} on it",
+    "list_employees": lambda a: "Checking on the team",
     "system_power": lambda a: (
         "Cancelling the pending shutdown" if a.get("action") == "cancel"
         else f"Restarting the PC{'' if float(a.get('delay_minutes', 1) or 0) == 0 else ' shortly'}"
@@ -186,7 +200,11 @@ def run_agent(command, on_activity=None, on_creation=None):
                     if block.get("type") != "tool_result":
                         continue
                     tname, _targs = tool_calls.get(block.get("tool_use_id"), ("", {}))
-                    if tname.split("__")[-1] != "build_creation" or not on_creation:
+                    # build_finance_dashboard returns build_creation's exact
+                    # payload shape (it just calls build_creation internally
+                    # with real spending data folded into the prompt), so the
+                    # live HUD creation panel should pop for it too.
+                    if tname.split("__")[-1] not in ("build_creation", "build_finance_dashboard") or not on_creation:
                         continue
                     structured = ((event.get("tool_use_result") or {}).get("structuredContent")) or {}
                     raw = structured.get("result")

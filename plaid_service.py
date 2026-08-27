@@ -23,6 +23,9 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 import statements_service
+import network_watch
+import speedtest_service
+import synology_service
 
 import plaid
 from plaid.api import plaid_api
@@ -241,6 +244,45 @@ def _statements_summary():
     return jsonify(summary)
 
 
+@app.route("/homelab/nas")
+def _homelab_nas():
+    if not synology_service.SYNOLOGY_AVAILABLE:
+        return jsonify({"configured": False})
+    try:
+        status = synology_service.get_status()
+        return jsonify({"configured": True, **status})
+    except Exception as e:
+        return jsonify({"configured": True, "error": str(e)}), 502
+
+
+@app.route("/homelab/speedtest")
+def _homelab_speedtest_last():
+    return jsonify({
+        "available": speedtest_service.SPEEDTEST_AVAILABLE,
+        "last_result": speedtest_service.get_last_result(),
+    })
+
+
+@app.route("/homelab/speedtest/run", methods=["POST"])
+def _homelab_speedtest_run():
+    if not speedtest_service.SPEEDTEST_AVAILABLE:
+        return jsonify({"error": "speedtest-cli isn't installed"}), 400
+    try:
+        return jsonify(speedtest_service.run_speed_test())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/homelab/network")
+def _homelab_network():
+    return jsonify(network_watch.last_scan_summary())
+
+
+@app.route("/homelab/network/scan", methods=["POST"])
+def _homelab_network_scan():
+    return jsonify(network_watch.scan())
+
+
 def start_server():
     statements_service.ensure_statements_dir()
 
@@ -249,3 +291,5 @@ def start_server():
     threading.Thread(target=_run, daemon=True, name="PlaidServer").start()
     print(f"  [Plaid] Local API -> http://localhost:{PORT} (configured: {_is_configured()})")
     print(f"  [Statements] Drop bank exports (CSV/TXT/PDF/XLSX/OFX/QFX/images/ZIP) in {statements_service.STATEMENTS_DIR}")
+    print(f"  [Homelab] NAS configured: {synology_service.SYNOLOGY_AVAILABLE}, "
+          f"nmap available: {network_watch.NMAP_AVAILABLE}, speedtest-cli available: {speedtest_service.SPEEDTEST_AVAILABLE}")

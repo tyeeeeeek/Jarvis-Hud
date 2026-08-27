@@ -21,3 +21,4 @@ google-auth-oauthlib
 pypdf
 openpyxl
 pytesseract
+speedtest-cli

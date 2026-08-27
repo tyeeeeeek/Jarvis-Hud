@@ -12,10 +12,27 @@ Electron, React, and a Python voice pipeline. Highlights:
   access) if the Claude CLI can't be reached.
 - **Real YouTube control**: "play [song] by [artist]" drives a dedicated, visible,
   Playwright-controlled Chromium window that actually searches and clicks play — not
-  just a search page.
+  just a search page. "stop"/"close the browser" shut it back down; the next open
+  request transparently relaunches a fresh window.
 - **Creator mode**: ask Jarvis to build something ("build me a dashboard that shows
   ...") and it appears live inside the HUD in a sandboxed, animated panel, or opens as
-  a full site in your browser.
+  a full site in your browser. `build_finance_dashboard` grounds this specifically in
+  your real synced spending data (never invented numbers).
+- **Financial insights**: `get_financial_insights` reads the synced statement ledger for
+  concrete tips — an outsized spending category, a real spike/drop vs. the prior period,
+  and merchants that look like recurring subscriptions — not generic advice.
+- **Basic terminal diagnostics**: `run_diagnostic_command` runs one of a fixed, curated,
+  read-only set (disk/memory usage, top processes, network info, uptime, ping, listening
+  ports) — the closest thing to "run a PowerShell/terminal command" Jarvis has, deliberately
+  never a generic shell-exec (see "Safety model" below).
+- **Manager mode**: "hire a developer/designer/researcher/analyst to ..." gives a job a
+  name and routes it to the matching existing tool (`self_improve`, `build_creation`,
+  `ask_claude_web`, `get_financial_insights`) — hiring never grants new capability, just a
+  roster you can check with "who's on my team." See `hire_employee`/`list_employees`.
+- **Homelab widget**: Synology NAS status (CPU/memory/storage, read-only), a real
+  internet speed test (on demand or every 6 hours), and router-agnostic new-device
+  LAN alerts (an nmap ping sweep from this PC, not a router API) over Telegram. See
+  "Homelab (NAS + network)" below — the NAS piece needs some setup on your end.
 - **Live weather widget** (via the free Open-Meteo API — no API key needed)
 - **Time / date widget**
 - **Voice wake word** ("Jarvis") with speech recognition
@@ -45,6 +62,19 @@ function:
 - Anything Jarvis builds (creator mode) renders in a sandboxed iframe
   (`sandbox="allow-scripts"`, no `allow-same-origin`) so generated code can't reach the
   app, your files, or your cookies.
+- `run_diagnostic_command` is a fixed, named allowlist (disk/memory usage, processes,
+  network info, uptime, whoami, listening ports, ping), never a general shell-exec — the
+  brain can only pick a name from the list, the argv for each is hardcoded, `subprocess`
+  is always called with a list (never `shell=True`/a joined string), and ping's hostname
+  argument is the only free-text input, strictly validated before it's used.
+- "Hiring an employee" (`hire_employee`) never grants new capability — it only routes a
+  named job to one of the existing narrow tools above (`self_improve`, `build_creation`,
+  `ask_claude_web`, `get_financial_insights`), each already scoped exactly as described here.
+- The Synology NAS integration is read-only monitoring only — CPU/memory/storage status,
+  nothing else. There is deliberately no tool that can reboot, shut down, or reconfigure
+  the NAS. The LAN device scan (`network_watch.py`) is a read-only ping sweep + reading
+  this PC's own kernel neighbor table — it never touches the router or any discovered
+  device beyond pinging it.
 
 ---
 
@@ -351,6 +381,70 @@ Same on-demand tools as JarvisCPU_Alerts above apply here too — ask for its
 status or a test send any time rather than waiting for the next 6 AM report.
 
 Fully inert (no-op, no errors) until `JARVIS_IMPROVEMENT_BOT_TOKEN` is set.
+
+---
+
+## Homelab (NAS + network)
+
+Jarvis can report on your Synology NAS and your LAN — a "Homelab" HUD widget plus
+voice/text tools (`get_nas_status`, `check_internet_speed`, `scan_network`), backed
+by three modules: `synology_service.py`, `speedtest_service.py`, `network_watch.py`.
+
+**Router note:** this deliberately does *not* depend on any router API. Most
+routers (especially ISP-provided ones like an Xfinity gateway) expose no usable
+local API, so instead `network_watch.py` scans the LAN directly from this PC — an
+`nmap` ping sweep of your subnet, then reading back IP/MAC pairs from this
+machine's own kernel neighbor table. That works identically regardless of router
+brand or what's plugged into it (including a plain unmanaged switch, which doesn't
+segment the network), and needs no router configuration at all.
+
+### Synology NAS status (read-only)
+
+1. **Create a dedicated, low-privilege DSM user for Jarvis** — DSM's web UI:
+   Control Panel → User & Group → Create. It only needs to be able to log in and
+   view system status; it does **not** need admin/administrators-group membership.
+   Using your own admin account would work too, but isn't recommended — least
+   privilege matters if `.env` ever leaks, even though Jarvis only ever calls
+   read-only status APIs with it (there is no NAS power-control tool).
+2. In `.env`, set:
+   ```
+   SYNOLOGY_HOST=10.0.0.x        # the NAS's LAN IP, or its Tailscale IP (100.x.x.x)
+   SYNOLOGY_PORT=5001            # DSM's default HTTPS port
+   SYNOLOGY_USER=jarvis-readonly # the dedicated user from step 1
+   SYNOLOGY_PASSWORD=...
+   ```
+   Since this PC and the NAS are both already on the same Tailscale tailnet, the
+   Tailscale IP works exactly as well as the LAN IP here — it's just an HTTPS
+   request to whatever host you put in `SYNOLOGY_HOST`; no separate setup needed on
+   either side. Use the Tailscale IP if you'd rather not expose DSM on the LAN at
+   all, or want NAS status to keep working if Jarvis is ever off your home network.
+3. Restart Jarvis and ask "what's my NAS status" or check the Homelab widget.
+
+This was written against Synology's documented Web API but **not verified against
+a live NAS** (no network path to it from where this was built) — if it errors, the
+raw DSM response is included in the error message; paste that back and it's a
+quick fix (or ask Jarvis to `self_improve` it).
+
+### New-device LAN alerts + internet speed
+
+1. Install nmap: `sudo apt install nmap` (needed for `scan_network`/new-device
+   alerts; everything else in this project still works fine without it).
+2. Install speedtest-cli into the venv: it's already in `requirements.txt`, so a
+   normal `pip install -r requirements.txt` picks it up; on an existing install,
+   `venv/bin/pip install speedtest-cli` (Windows: `venv\Scripts\pip`).
+3. Restart Jarvis. The terminal should print a `[Homelab]` line showing what's
+   configured/available.
+
+Once nmap is installed, a background scan runs every 15 minutes (immediately on
+startup, too) and any device seen for the first time triggers a Telegram alert
+through the same bridge "Text Jarvis" already uses — no extra bot to set up. A
+real internet speed test runs automatically every 6 hours (logged, not spoken),
+or ask Jarvis any time for an on-demand one — takes about 15-30 seconds. The
+Homelab widget also has a manual "RUN SPEED TEST" / "SCAN NOW" button for either.
+
+`LAN_SUBNET_OVERRIDE` in `.env` only needs setting if subnet auto-detection
+guesses wrong (e.g. your network isn't a /24) — leave it blank first and check the
+terminal output before touching it.
 
 ---
 

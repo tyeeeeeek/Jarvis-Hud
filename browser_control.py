@@ -360,18 +360,39 @@ def _do_control(action, page):
         page.keyboard.press("Home"); page.keyboard.press("k"); page.keyboard.press("k")
     elif action == "mute":
         page.keyboard.press("m")
+    elif action == "stop":
+        # Unlike play_pause (a toggle via the 'k' key), "stop" is meant to be
+        # idempotent -- always ends up paused, never accidentally resumes
+        # playback if it was already paused. Reaches into the page directly
+        # rather than a keypress for that reason.
+        page.evaluate("() => { const v = document.querySelector('video'); if (v) v.pause(); }")
     return True
 
 
 def control(action: str) -> str:
     action = (action or "").strip().lower()
-    if action not in ("play_pause", "next", "mute"):
-        return "I can play/pause, restart, or mute the YouTube tab sir."
+    if action not in ("play_pause", "next", "mute", "stop"):
+        return "I can play/pause, stop, restart, or mute the YouTube tab sir."
     try:
         _submit(lambda page: _do_control(action, page), timeout=15, relaunch=False)
         return {"play_pause": "Toggling playback sir.", "next": "Restarting the video sir.",
-                "mute": "Muting sir."}[action]
+                "mute": "Muting sir.", "stop": "Stopping playback sir."}[action]
     except Exception as e:
         if _NOT_OPEN_ERR in str(e):
             return "There's no YouTube video playing right now sir."
         return f"I couldn't control the YouTube tab sir: {e}"
+
+
+def close() -> str:
+    """Close the dedicated Jarvis browser window if one is open. A later
+    open_url/play_youtube/control call transparently relaunches a fresh
+    window (same worker-restart mechanism a crashed/wedged browser already
+    uses), so this is safe to call any time -- never a dead end."""
+    global _worker_alive
+    with _state_lock:
+        alive, q = _worker_alive, _current_queue
+        _worker_alive = False
+    if not alive or q is None:
+        return "There's no browser window open right now sir."
+    q.put((None, concurrent.futures.Future(), True))
+    return "Closing the browser sir."

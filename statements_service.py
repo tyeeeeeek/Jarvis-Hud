@@ -618,3 +618,26 @@ def get_spending_summary(days=30):
         "top_merchants": [{"name": n, "amount": round(a, 2)} for n, a in top_merchants],
         "monthly_trend": [{"month": m, "amount": round(a, 2)} for m, a in trend],
     }
+
+
+def get_recurring_charges(min_occurrences=2, top_n=5):
+    """Best-effort subscription/recurring-charge detector: groups the full
+    synced ledger by (description, amount-to-the-cent) and returns anything
+    seen `min_occurrences`+ times, sorted by total impact -- the shape of a
+    subscription (same merchant, same amount, repeatedly) rather than a
+    one-off purchase. Backs get_financial_insights' "these look recurring"
+    tip and build_finance_dashboard's dashboard."""
+    ledger = _load_ledger()
+    seen = {}
+    for tx in ledger.values():
+        amount = tx.get("amount", 0)
+        if amount <= 0:
+            continue
+        key = (tx.get("description", "").strip(), round(amount, 2))
+        seen[key] = seen.get(key, 0) + 1
+    recurring = [
+        {"name": desc, "amount": amt, "count": count}
+        for (desc, amt), count in seen.items() if count >= min_occurrences
+    ]
+    recurring.sort(key=lambda r: -(r["amount"] * r["count"]))
+    return recurring[:top_n]

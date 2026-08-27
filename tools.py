@@ -54,6 +54,11 @@ try:
 except ImportError:
     BROWSER_CONTROL_AVAILABLE = False
 
+import network_watch
+import speedtest_service
+import synology_service
+import tailscale_service
+
 
 HOME = os.path.expanduser("~")
 CLAUDE_CLI = shutil.which("claude") or os.path.join(
@@ -518,14 +523,27 @@ def play_youtube(query: str) -> str:
 
 def youtube_control(action: str) -> str:
     """Control the dedicated YouTube automation browser window specifically
-    (play_pause, next -- meaning restart the current video, mute). For system-
-    wide media keys (works on Spotify etc too) use media_control instead."""
+    (play_pause, next -- meaning restart the current video, mute, stop --
+    always pauses, never toggles back to playing). For system-wide media keys
+    (works on Spotify etc too) use media_control instead."""
     if not BROWSER_CONTROL_AVAILABLE:
         return "The YouTube browser isn't available sir."
     try:
         return browser_control.control(action or "")
     except Exception as e:
         return f"I couldn't do that sir: {e}"
+
+
+def close_browser() -> str:
+    """Close the dedicated Jarvis browser window (used by open_website,
+    play_youtube, search_web). Safe to call any time -- the next open/play
+    request transparently opens a fresh window."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return "The browser control module isn't available sir."
+    try:
+        return browser_control.close()
+    except Exception as e:
+        return f"I couldn't close the browser sir: {e}"
 
 
 # ================================================================ WEATHER
@@ -841,6 +859,217 @@ def system_power(action: str, delay_minutes: float = 1) -> str:
         return f"I couldn't {action} the PC sir: {e}"
 
 
+# ================================================================ TERMINAL / SYSTEM DIAGNOSTICS
+# The "basic PowerShell/terminal commands" capability -- deliberately NOT a
+# generic shell-exec tool (that stays forbidden, see the module docstring at
+# the top of this file). The brain can only pick a *name* from the fixed
+# list below; the underlying argv for each name is hardcoded, subprocess.run
+# is always called with a list (never shell=True or a joined string, so
+# there's no shell-metacharacter injection surface), and every command here
+# is read-only/non-destructive. The one command that takes a free-text
+# argument (ping's hostname) is strictly validated against _HOSTNAME_RE
+# before it's appended to the fixed argv, so nothing else can ever reach it.
+_DIAGNOSTIC_COMMANDS_WIN = {
+    "disk_usage": (["powershell", "-NoProfile", "-Command",
+                     "Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize"], False),
+    "memory_usage": (["powershell", "-NoProfile", "-Command",
+                       "Get-CimInstance Win32_OperatingSystem | "
+                       "Select-Object FreePhysicalMemory,TotalVisibleMemorySize | Format-List"], False),
+    "processes": (["powershell", "-NoProfile", "-Command",
+                    "Get-Process | Sort-Object CPU -Descending | "
+                    "Select-Object -First 15 Name,CPU,Id | Format-Table -AutoSize"], False),
+    "network_info": (["ipconfig", "/all"], False),
+    "uptime": (["powershell", "-NoProfile", "-Command",
+                "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"], False),
+    "whoami": (["whoami"], False),
+    "listening_ports": (["netstat", "-an"], False),
+    "ping": (["ping", "-n", "4"], True),
+}
+_DIAGNOSTIC_COMMANDS_LINUX = {
+    "disk_usage": (["df", "-h"], False),
+    "memory_usage": (["free", "-h"], False),
+    "processes": (["bash", "-c", "ps aux --sort=-%cpu | head -16"], False),
+    "network_info": (["ip", "addr"], False),
+    "uptime": (["uptime"], False),
+    "whoami": (["whoami"], False),
+    "listening_ports": (["ss", "-tulpn"], False),
+    "ping": (["ping", "-c", "4"], True),
+}
+_DIAGNOSTIC_COMMANDS = _DIAGNOSTIC_COMMANDS_WIN if IS_WINDOWS else _DIAGNOSTIC_COMMANDS_LINUX
+_HOSTNAME_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9\-.]{0,252})$')
+
+
+def run_diagnostic_command(command: str, target: str = "") -> str:
+    """Run one basic, safe, read-only system/network diagnostic -- Jarvis's
+    equivalent of a basic PowerShell/terminal command, restricted to a fixed
+    named list rather than free-text (never a generic shell-exec -- see this
+    file's module docstring). command must be one of: disk_usage,
+    memory_usage, processes, network_info, uptime, whoami, listening_ports,
+    ping. `target` is only used by ping and must be a plain hostname or IP
+    (e.g. "google.com", "8.8.8.8") -- nothing else is accepted."""
+    key = (command or "").strip().lower()
+    entry = _DIAGNOSTIC_COMMANDS.get(key)
+    if not entry:
+        return (f"I don't have '{command}' in my diagnostic command list sir -- I can run: "
+                 + ", ".join(sorted(_DIAGNOSTIC_COMMANDS)) + ".")
+    base_cmd, needs_target = entry
+    cmd = list(base_cmd)
+    if needs_target:
+        target = (target or "").strip()
+        if not target or not _HOSTNAME_RE.match(target):
+            return "I need a plain hostname or IP address to ping sir -- letters, numbers, dots, and dashes only."
+        cmd.append(target)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        output = (result.stdout or result.stderr or "").strip()
+        if not output:
+            return f"Ran {key} sir -- no output."
+        if len(output) > 1500:
+            output = output[:1500] + "\n... (truncated)"
+        return f"{key} sir:\n{output}"
+    except FileNotFoundError:
+        return f"That diagnostic isn't available on this system sir ({cmd[0]} not found)."
+    except subprocess.TimeoutExpired:
+        return "That diagnostic took too long sir, I stopped waiting."
+    except Exception as e:
+        return f"I couldn't run that diagnostic sir: {e}"
+
+
+# ================================================================ HOMELAB (NAS + network, thin wrappers)
+def get_nas_status() -> str:
+    """Report your Synology NAS's current status -- CPU load, memory use,
+    and storage volume usage. Read-only; there is no NAS power-control
+    capability. Requires SYNOLOGY_HOST/USER/PASSWORD to be set in .env
+    first."""
+    if not synology_service.SYNOLOGY_AVAILABLE:
+        return "Your NAS isn't configured sir -- set SYNOLOGY_HOST/SYNOLOGY_USER/SYNOLOGY_PASSWORD in .env first."
+    try:
+        status = synology_service.get_status()
+    except Exception as e:
+        return f"I couldn't reach your NAS sir: {e}"
+    vol_note = ""
+    if status["volumes"]:
+        v = status["volumes"][0]
+        if v["used_pct"] is not None:
+            vol_note = f", storage is {v['used_pct']:.0f} percent full"
+    mem_note = f", memory at {status['mem_used_pct']} percent" if status.get("mem_used_pct") is not None else ""
+    return f"Your NAS is at {status['cpu_pct']:.0f} percent CPU{mem_note}{vol_note} sir."
+
+
+def check_internet_speed() -> str:
+    """Run a real internet speed test right now (takes roughly 15-30
+    seconds) and report download/upload speed and ping. Use this for "how's
+    my internet"/"run a speed test"/"check my wifi speed" requests."""
+    try:
+        result = speedtest_service.run_speed_test()
+    except Exception as e:
+        return f"I couldn't run a speed test sir: {e}"
+    ping_note = f"{result['ping_ms']:.0f} ms ping" if result["ping_ms"] is not None else "ping unavailable"
+    return (f"{result['download_mbps']:.0f} down, {result['upload_mbps']:.0f} up, "
+            f"{ping_note} sir -- tested against {result['server']}.")
+
+
+def scan_network() -> str:
+    """Scan the local network for connected devices (router-agnostic --
+    works by pinging the local subnet directly from this PC, not by talking
+    to the router). Reports the total device count and flags anything new
+    since the last scan; new devices also trigger a Telegram alert
+    automatically in the background. Requires nmap installed."""
+    result = network_watch.scan()
+    if "error" in result:
+        return result["error"]
+    if result["new_count"]:
+        new_ips = ", ".join(d["ip"] for d in result["devices"] if d["new"])
+        return (f"{len(result['devices'])} devices on your network sir -- "
+                f"{result['new_count']} new: {new_ips}.")
+    return f"{len(result['devices'])} devices on your network sir, nothing new."
+
+
+# ================================================================ TAILSCALE
+def get_tailscale_status() -> str:
+    """Report the full tailnet picture -- this machine's own Tailscale IP
+    and connection state, plus every other device on the tailnet (name,
+    IP, OS, online/offline). Use this for "what's on my tailnet"/"is my
+    NAS reachable over tailscale"/"what's my tailscale IP" requests."""
+    if not tailscale_service.TAILSCALE_AVAILABLE:
+        return "Tailscale isn't installed on this machine sir."
+    try:
+        status = tailscale_service.get_status()
+    except Exception as e:
+        return f"I couldn't reach Tailscale sir: {e}"
+    online = [p for p in status["peers"] if p["online"]]
+    offline = [p for p in status["peers"] if not p["online"]]
+    parts = [f"I'm {status['self_name']} at {status['self_ip']} sir, {status['backend_state'].lower()}."]
+    if online:
+        parts.append(f"Online: {', '.join(p['name'] for p in online)}.")
+    if offline:
+        parts.append(f"Offline: {', '.join(p['name'] for p in offline)}.")
+    if status["using_exit_node"]:
+        parts.append("Routing traffic through an exit node right now.")
+    return " ".join(parts)
+
+
+def tailscale_ping(device: str) -> str:
+    """Check real connectivity to a named device on your tailnet (phone,
+    NAS, other PCs) -- a real Tailscale ping, not just checking last-seen
+    status. Use for "can you reach my NAS over tailscale"/"ping my phone
+    on tailscale" requests."""
+    if not tailscale_service.TAILSCALE_AVAILABLE:
+        return "Tailscale isn't installed on this machine sir."
+    if not device or not device.strip():
+        return "Which device sir?"
+    try:
+        result = tailscale_service.ping(device)
+    except Exception as e:
+        return f"I couldn't ping that sir: {e}"
+    if result["ok"]:
+        return f"{device} responded sir -- {result['detail'].splitlines()[0] if result['detail'] else 'reachable'}."
+    return f"I couldn't reach {device} over Tailscale sir."
+
+
+def set_tailscale_exit_node(device: str) -> str:
+    """Route this machine's internet traffic through a named tailnet
+    device that offers exit-node routing, or turn it off (device="off").
+    Use for "route my traffic through my NAS"/"use [device] as an exit
+    node"/"turn off the exit node" requests. Needs a one-time permission
+    grant on this machine the first time (message will say exactly what to
+    run if that's missing)."""
+    if not tailscale_service.TAILSCALE_AVAILABLE:
+        return "Tailscale isn't installed on this machine sir."
+    try:
+        result = tailscale_service.set_exit_node(device)
+    except Exception as e:
+        return f"I couldn't change that sir: {e}"
+    return f"{result['message'].rstrip('.')} sir."
+
+
+def tailscale_connect() -> str:
+    """Bring this machine's Tailscale connection up. Needs a one-time
+    permission grant the first time (message will say exactly what to run
+    if that's missing)."""
+    if not tailscale_service.TAILSCALE_AVAILABLE:
+        return "Tailscale isn't installed on this machine sir."
+    try:
+        tailscale_service.connect()
+    except Exception as e:
+        return f"I couldn't connect sir: {e}"
+    return "Tailscale's up sir."
+
+
+def tailscale_disconnect() -> str:
+    """Take this machine off the tailnet. Note this also cuts off any
+    remote access to Jarvis that goes over Tailscale specifically (LAN
+    access is unaffected). Needs a one-time permission grant the first
+    time (message will say exactly what to run if that's missing)."""
+    if not tailscale_service.TAILSCALE_AVAILABLE:
+        return "Tailscale isn't installed on this machine sir."
+    try:
+        tailscale_service.disconnect()
+    except Exception as e:
+        return f"I couldn't disconnect sir: {e}"
+    return "Tailscale's down sir."
+
+
 # ================================================================ FINANCE (unchanged services, thin wrappers)
 def sync_bank_data() -> str:
     """Sync the latest bank transactions into Jarvis's records. Call this on
@@ -902,6 +1131,81 @@ def get_spending_summary() -> str:
         trend_note = f" That's {direction} {abs(change_pct):.0f} percent from the prior thirty days."
     return (f"Over the last thirty days you've spent {summary['total_spent']:.0f} dollars sir, "
             f"most of it on {top['name']}, about {top['amount']:.0f} dollars.{trend_note}")
+
+
+def get_financial_insights() -> str:
+    """Give a deeper financial read than get_spending_summary -- concrete,
+    actionable tips grounded in the actual synced data: whether one category
+    is eating an outsized share of spending, a real spike or drop versus the
+    prior period, and merchants that look like recurring subscriptions (same
+    name and amount, seen repeatedly). Use this specifically for "give me
+    financial tips" / "how am I doing with money" / "any insights on my
+    spending" requests; use get_spending_summary for a plain numbers recap
+    instead."""
+    if not (STATEMENTS_AVAILABLE and statements_service.has_data()):
+        return ("I don't have enough spending data yet sir -- send me a bank statement over "
+                 "Telegram and say sync statements first.")
+    try:
+        summary = statements_service.get_spending_summary(days=30)
+        recurring = statements_service.get_recurring_charges()
+    except Exception as e:
+        return f"I couldn't pull your spending data sir: {e}"
+    if not summary or not summary["by_category"]:
+        return "No transactions found for the last thirty days sir, nothing to give tips on yet."
+
+    tips = []
+    total = summary["total_spent"] or 0.0
+    top = summary["by_category"][0]
+    if total > 0 and top["amount"] / total >= 0.4:
+        tips.append(f"{top['name']} alone is {top['amount'] / total * 100:.0f} percent of your "
+                     f"spending this month, about {top['amount']:.0f} dollars -- that's a lot "
+                     f"concentrated in one category.")
+
+    change_pct = summary.get("change_pct")
+    if change_pct is not None and change_pct >= 20:
+        tips.append(f"You're spending {change_pct:.0f} percent more than the prior thirty days -- "
+                     "worth a look at what changed.")
+    elif change_pct is not None and change_pct <= -20:
+        tips.append(f"You've cut spending {abs(change_pct):.0f} percent versus the prior thirty "
+                     "days -- nicely done sir.")
+
+    if recurring:
+        lines = "; ".join(f"{r['name']} at {r['amount']:.2f} dollars, seen {r['count']} times"
+                           for r in recurring[:3])
+        tips.append(f"These look like recurring charges or subscriptions: {lines}.")
+
+    if not tips:
+        tips.append("Nothing stands out sir -- your spending looks steady and spread out.")
+
+    return "Financial insights sir: " + " ".join(tips)
+
+
+def build_finance_dashboard() -> str:
+    """Build and show a real financial dashboard grounded in the user's
+    actual synced spending data -- category/merchant breakdown, the trend vs
+    the prior period, and detected recurring charges -- not a guess. Use this
+    specifically for "build me a dashboard" / "show me a spending dashboard" /
+    "make me a website of my finances" requests; falls back to asking the
+    user to sync statements first if nothing's synced yet."""
+    if not (STATEMENTS_AVAILABLE and statements_service.has_data()):
+        return ("I don't have any spending data synced yet sir -- send me a bank statement "
+                 "over Telegram and say sync statements first.")
+    try:
+        summary = statements_service.get_spending_summary(days=30)
+        recurring = statements_service.get_recurring_charges()
+    except Exception as e:
+        return f"I couldn't pull your spending data sir: {e}"
+    if not summary or not summary["by_category"]:
+        return "No transactions found for the last thirty days sir, nothing to build a dashboard from yet."
+    data_blob = json.dumps({"summary": summary, "recurring_charges": recurring})
+    description = (
+        "A personal finance dashboard built from this real spending data (JSON -- use exactly "
+        f"these figures, never invent numbers): {data_blob}. Show total spent, a category "
+        "breakdown (a bar or donut chart drawn with inline SVG/canvas, no external chart "
+        "library), the monthly trend, top merchants, and a short callout list of the detected "
+        "recurring charges/subscriptions."
+    )
+    return build_creation(description, kind="dashboard")
 
 
 # ================================================================ EYES (screen vision, off by default, on-demand only)
@@ -1362,3 +1666,109 @@ def send_agent_test_message(agent: str) -> str:
     message = (f"Test message sent to {name} sir -- Telegram confirmed delivery." if ok else
                f"Test send to {name} failed sir -- check the bot token, chat ID, and network.")
     return json.dumps({"ok": ok, "agent": name, "message": message})
+
+
+# ================================================================ MANAGER / EMPLOYEES
+# Jarvis-as-manager framing over the narrow capabilities already defined
+# above -- "hiring an employee" never grants any new capability, it just
+# gives a job a name and routes it to whichever existing scoped function
+# already does that kind of work:
+#   developer  -> self_improve()       (real, verified, committed code changes)
+#   designer   -> build_creation()     (a dashboard or webpage)
+#   researcher -> ask_claude_web()     (live web research/Q&A)
+#   analyst    -> get_financial_insights() (spending tips from synced data)
+# Every one of those already runs inside its own tightly-scoped nested
+# Claude Code call (fixed --tools allowlist, no shell-exec surface beyond
+# what those functions already had) -- hire_employee adds no new subprocess
+# call of its own, only a name, a routing decision, and a roster log so the
+# user can ask "who's on my team" / "what has my team done" later.
+EMPLOYEE_ROSTER_PATH = os.path.join(JARVIS_DIR, "employee_roster.jsonl")
+
+_EMPLOYEE_ROLES = {
+    "developer": "code/self-improvement work on Jarvis itself",
+    "designer": "building a dashboard or webpage",
+    "researcher": "answering something that needs live web research",
+    "analyst": "financial insights and spending tips from synced statements",
+}
+_ROLE_TITLES = {"developer": "Dev", "designer": "Design", "researcher": "Research", "analyst": "Finance"}
+
+
+def _next_employee_name(role):
+    """Sequential per-role name (Dev-1, Dev-2, Design-1, ...), counted from
+    the roster log itself so names stay stable across restarts without a
+    separate counter file to keep in sync."""
+    title = _ROLE_TITLES.get(role, role.title())
+    count = sum(1 for e in _read_jsonl_tail(EMPLOYEE_ROSTER_PATH, max_lines=10000) if e.get("role") == role)
+    return f"{title}-{count + 1}"
+
+
+def _log_employee_job(name, role, job, ok, result_summary):
+    _ensure_jarvis_dir()
+    entry = {"ts": time.time(), "name": name, "role": role, "job": job,
+              "ok": ok, "summary": (result_summary or "")[:500]}
+    try:
+        with open(EMPLOYEE_ROSTER_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def hire_employee(role: str, job: str) -> str:
+    """Act as the manager: "hire" a named employee (bot) to run one specific
+    job, then report back what got done. role must be one of: developer
+    (code/self-improvement changes to Jarvis itself), designer (build a
+    dashboard or webpage), researcher (answer something needing live web
+    search), analyst (financial insights/spending tips from synced
+    statements). Use this whenever the user explicitly asks Jarvis to
+    "hire"/"get someone"/"put someone on"/"bring on" a job -- for a direct
+    request ("build me a dashboard", "improve X") just call that specific
+    tool instead. This is a friendly framing over Jarvis's existing narrow
+    tools; hiring never grants any new capability, only names and routes the
+    job and logs it so list_employees can report on past hires."""
+    role = (role or "").strip().lower()
+    job = (job or "").strip()
+    if role not in _EMPLOYEE_ROLES:
+        return (f"I don't have a '{role}' role sir -- I can hire a: "
+                 + ", ".join(f"{r} ({d})" for r, d in _EMPLOYEE_ROLES.items()))
+    if not job:
+        return "What should they work on sir?"
+
+    name = _next_employee_name(role)
+    intro = f"Putting {name} on it sir: {job}\n\n"
+
+    try:
+        if role == "developer":
+            data = json.loads(self_improve(job))
+            ok = bool(data.get("ok"))
+            result = data.get("message") or data.get("summary") or ""
+        elif role == "designer":
+            kind = "webpage" if re.search(r'\bwebsite\b|\bwebpage\b|\bsite\b', job.lower()) else "dashboard"
+            data = json.loads(build_creation(job, kind=kind))
+            ok = bool(data.get("ok"))
+            result = data.get("message") or (f"Built and saved it sir: {data.get('path', '')}" if ok else "")
+        elif role == "researcher":
+            result = ask_claude_web(job)
+            ok = not result.startswith("I couldn't") and not result.startswith("That took too long")
+        else:  # analyst
+            result = get_financial_insights()
+            ok = "I don't have enough spending data" not in result
+    except Exception as e:
+        ok, result = False, f"ran into an error: {e}"
+
+    _log_employee_job(name, role, job, ok, result)
+    return intro + (result or ("Done sir." if ok else "Couldn't get that done sir."))
+
+
+def list_employees() -> str:
+    """Report on the manager's team: everyone Jarvis has "hired" recently and
+    what they were put on, most recent first. Use this for "who's on my
+    team" / "what has my team been working on" / "employee status"
+    requests."""
+    entries = _read_jsonl_tail(EMPLOYEE_ROSTER_PATH, max_lines=10)
+    if not entries:
+        return "No one's been hired yet sir -- ask me to hire a developer, designer, researcher, or analyst for a job."
+    lines = []
+    for e in reversed(entries):
+        status = "done" if e.get("ok") else "hit a snag"
+        lines.append(f"{e.get('name')} ({e.get('role')}) -- \"{e.get('job')}\" -- {status}, {_fmt_ago(e['ts'])}")
+    return "Your team sir:\n" + "\n".join(lines)

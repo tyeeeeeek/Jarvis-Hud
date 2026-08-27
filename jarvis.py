@@ -645,10 +645,30 @@ def _on_brain_creation(payload):
         "html": html,
     })
     if payload.get("kind") == "webpage":
+        _open_in_browser("file:///" + path.replace("\\", "/"))
+
+
+_BRAVE_BIN = shutil.which("brave") or shutil.which("brave-browser")
+
+
+def _open_in_browser(url):
+    """Open a built website the way Claude Code opens an artifact: pop it
+    straight open, prominently, in the user's actual everyday browser --
+    Brave specifically if it's installed, since that's what's asked for --
+    rather than just quietly saving a file. Falls back to webbrowser.open()
+    (whatever the OS default association is) if Brave isn't found, so this
+    never silently does nothing."""
+    if _BRAVE_BIN:
         try:
-            webbrowser.open("file:///" + path.replace("\\", "/"))
-        except Exception:
-            pass
+            subprocess.Popen([_BRAVE_BIN, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+            return
+        except Exception as e:
+            print(f"  [Creation] Couldn't launch Brave, falling back: {e}")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
 
 
 def _notify_all(text):
@@ -735,6 +755,48 @@ def _improvement_watcher_thread():
         print(f"  [JarvisImprovement] {result}")
         if result.get("ok"):
             jarvis_improvement.send_report(result.get("added", []), result.get("timed_out", False))
+
+
+_NETWORK_SCAN_INTERVAL_SECONDS = 15 * 60  # 15 minutes
+
+
+def _network_watch_thread():
+    """Runs a LAN device scan immediately, then every 15 minutes for as long
+    as Jarvis's backend is running -- router-agnostic (see network_watch.py),
+    works the same regardless of what router/switch is in front of it.
+    New-device Telegram alerts happen inside network_watch.scan() itself, so
+    this thread only needs to keep calling it on a cadence; nothing here
+    needs to speak or notify separately. Silently a no-op if nmap isn't
+    installed (tools.scan_network() reports that in its return value, which
+    is logged here but never spoken)."""
+    while not pipeline_stop.is_set():
+        try:
+            result = tools.scan_network()
+            print(f"  [Network] {result}")
+        except Exception as e:
+            print(f"  [Network] {e}")
+        if pipeline_stop.wait(_NETWORK_SCAN_INTERVAL_SECONDS):
+            break
+
+
+_SPEEDTEST_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
+
+
+def _speedtest_watcher_thread():
+    """Runs a real internet speed test every 6 hours for as long as Jarvis's
+    backend is running, logged to ~/.jarvis/speedtest_log.jsonl via
+    speedtest_service -- unlike the other watchers, this one waits out the
+    first interval before its first run rather than running immediately on
+    startup, since it actually uses real bandwidth for ~15-30 seconds each
+    time. Silently a no-op if speedtest-cli isn't installed."""
+    while not pipeline_stop.is_set():
+        if pipeline_stop.wait(_SPEEDTEST_INTERVAL_SECONDS):
+            break
+        try:
+            result = tools.check_internet_speed()
+            print(f"  [Speedtest] {result}")
+        except Exception as e:
+            print(f"  [Speedtest] {e}")
 
 
 def _on_important_email(category, summary):
@@ -871,6 +933,8 @@ def voice_loop():
     threading.Thread(target=_sms_command_thread, daemon=True, name="SMS").start()
     threading.Thread(target=_telegram_command_thread, daemon=True, name="Telegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
+    threading.Thread(target=_network_watch_thread, daemon=True, name="NetworkWatch").start()
+    threading.Thread(target=_speedtest_watcher_thread, daemon=True, name="Speedtest").start()
     time.sleep(0.5)
 
     set_status("Idle")
