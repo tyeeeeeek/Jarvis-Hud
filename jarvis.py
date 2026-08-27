@@ -453,11 +453,15 @@ def ask_ollama(question):
             return r.json().get("response", "I couldn't get a response.")
         return "Ollama returned an error."
     except requests.ConnectionError:
-        return "I can't reach my brain right now, and my main brain is offline too sir."
+        return ("My offline Ollama fallback isn't reachable either sir. That's on top "
+                "of Claude having failed for this one command -- I'll retry my main "
+                "brain fresh on your next request, so voice commands should keep working.")
     except requests.Timeout:
-        return "That took too long. Try again sir."
+        return ("My offline fallback timed out sir. I'll still retry my main Claude "
+                "brain fresh on your next command.")
     except Exception as e:
-        return f"Something went wrong: {e}"
+        return (f"Something went wrong with my offline fallback: {e} My main Claude "
+                 "brain will still be retried on your next command sir.")
 
 
 # ================================================================ BASIC (instant, zero-latency) COMMANDS
