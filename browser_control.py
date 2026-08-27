@@ -63,6 +63,19 @@ def _clear_stale_singleton_files():
             pass
 
 
+_page_crashed = {"flag": False}
+
+
+def _watch_for_crash(page):
+    """Playwright's page.is_closed() only reflects an explicit close -- a
+    renderer *crash* (tab dies but the window/context stays open) leaves
+    is_closed() False forever, which used to make every future request retry
+    the same dead page and fail in a loop. Track crashes explicitly so
+    _is_usable() can tell the two apart."""
+    _page_crashed["flag"] = False
+    page.on("crash", lambda _page: _page_crashed.update(flag=True))
+
+
 def _launch_context(p):
     os.makedirs(PROFILE_DIR, exist_ok=True)
     _clear_stale_singleton_files()
@@ -77,16 +90,43 @@ def _launch_context(p):
         ],
     )
     page = context.pages[0] if context.pages else context.new_page()
+    _watch_for_crash(page)
     return context, page
 
 
 def _is_usable(page):
-    if page is None:
+    if page is None or _page_crashed["flag"]:
         return False
     try:
         return not page.is_closed()
     except Exception:
         return False
+
+
+def _recover(old_page, context, p):
+    """Get a fresh, working page. Prefers opening a new tab in the existing
+    browser window (context still alive, e.g. only the tab crashed) over
+    closing and relaunching the whole window, so a single crashed tab
+    doesn't make the automation window itself flash shut and reopen. Falls
+    back to a full relaunch if the window/context itself is gone."""
+    if context is not None:
+        try:
+            new_page = context.new_page()
+        except Exception:
+            new_page = None
+        if new_page is not None:
+            if old_page is not None:
+                try:
+                    old_page.close()
+                except Exception:
+                    pass
+            _watch_for_crash(new_page)
+            return context, new_page
+        try:
+            context.close()
+        except Exception:
+            pass
+    return _launch_context(p)
 
 
 def _worker_thread():
@@ -103,14 +143,10 @@ def _worker_thread():
                 if not _is_usable(page):
                     if not relaunch:
                         raise RuntimeError("no YouTube window is currently open")
-                    # The window was closed by the user or Chromium crashed --
-                    # transparently relaunch instead of leaving playback dead.
-                    if context is not None:
-                        try:
-                            context.close()
-                        except Exception:
-                            pass
-                    context, page = _launch_context(p)
+                    # The tab crashed, the window was closed, or Chromium
+                    # crashed entirely -- transparently heal instead of
+                    # leaving playback dead.
+                    context, page = _recover(page, context, p)
                 result = fn(page)
                 if not fut.done():
                     fut.set_result(result)
