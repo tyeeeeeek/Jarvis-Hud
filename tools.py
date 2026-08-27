@@ -283,15 +283,26 @@ _APP_IMAGE_NAMES_WIN = {
     "pwsh": "pwsh.exe",
 }
 
-# Linux: alias -> the actual binary name to launch/pkill. Verified against
-# what's actually installed on this machine (GNOME 46 / Ubuntu 26.04):
-# ptyxis is the default terminal here (gnome-terminal isn't installed), and
-# gedit was renamed gnome-text-editor upstream. spotify/vs code/discord/
-# steam/slack/zoom aren't installed on this machine but are left as curated
-# placeholders in case they're added later -- launch_app already reports
-# "doesn't appear to be installed" cleanly if the binary isn't found.
+# Linux: alias -> the actual binary name to launch/pkill. Distros vary widely
+# in which terminal emulator ships by default (GNOME ships ptyxis or
+# gnome-terminal depending on version, KDE ships konsole, minimal installs
+# often only have xterm), so "terminal"/"command prompt" resolve dynamically
+# via _resolve_linux_terminal() instead of a single hardcoded binary. Direct
+# aliases for the well-known emulators are kept too, so "open konsole" still
+# works even when it isn't the default. gedit was renamed gnome-text-editor
+# upstream. spotify/vs code/discord/steam/slack/zoom aren't installed on this
+# machine but are left as curated placeholders in case they're added later --
+# launch_app already reports "doesn't appear to be installed" cleanly if the
+# binary isn't found.
+_TERMINAL_SENTINEL = "__linux_terminal__"
+_LINUX_TERMINAL_CANDIDATES = [
+    "ptyxis", "gnome-terminal", "konsole", "xfce4-terminal", "terminator",
+    "tilix", "alacritty", "kitty", "xterm", "x-terminal-emulator",
+]
 _APP_ALIASES_LINUX = {
-    "terminal": "ptyxis", "command prompt": "ptyxis",
+    "terminal": _TERMINAL_SENTINEL, "command prompt": _TERMINAL_SENTINEL,
+    "gnome-terminal": "gnome-terminal", "gnome terminal": "gnome-terminal",
+    "konsole": "konsole", "xterm": "xterm",
     "file explorer": "nautilus", "files": "nautilus", "explorer": "nautilus",
     "text editor": "gnome-text-editor", "gedit": "gnome-text-editor",
     "calculator": "gnome-calculator", "calc": "gnome-calculator",
@@ -300,21 +311,46 @@ _APP_ALIASES_LINUX = {
     "chrome": "google-chrome", "firefox": "firefox", "brave": "brave",
     "discord": "discord", "steam": "steam", "slack": "slack", "zoom": "zoom",
     # PowerShell Core (pwsh) is cross-platform -- "powershell" is the natural
-    # spoken alias, "pwsh" the literal binary/package name.
+    # spoken alias, "pwsh" the literal binary/package name. It's a CLI, not a
+    # GUI app, so it's exempt from the display-server check below.
     "powershell": "pwsh", "pwsh": "pwsh", "windows powershell": "pwsh",
 }
+# Binaries that don't need an X11/Wayland display to run at all (pure CLI).
+_LINUX_NO_DISPLAY_REQUIRED = {"pwsh"}
 
 _APP_ALIASES = _APP_ALIASES_WIN if IS_WINDOWS else _APP_ALIASES_LINUX
 _APP_IMAGE_NAMES = _APP_IMAGE_NAMES_WIN if IS_WINDOWS else None
 
 
+def _resolve_linux_terminal() -> str | None:
+    """Return the first installed terminal emulator binary from the
+    candidate list, or None if none of them are on PATH."""
+    for candidate in _LINUX_TERMINAL_CANDIDATES:
+        if shutil.which(candidate):
+            return candidate
+    return None
+
+
+def _linux_display_available() -> bool:
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def launch_app(name: str) -> str:
     """Launch a known desktop application by common name (e.g. notepad,
-    calculator, file explorer, chrome, spotify, discord, vs code, powershell)."""
+    calculator, file explorer, chrome, spotify, discord, vs code, terminal,
+    gnome-terminal, konsole, xterm, powershell/pwsh)."""
     key = re.sub(r'^(the|a|an)\s+', '', (name or "").strip().lower())
     exe = _APP_ALIASES.get(key)
     if not exe:
         return f"I don't have {name} in my known app list sir. Try opening it by hand once and I'll remember it next time you ask me to add it."
+    if not IS_WINDOWS and exe == _TERMINAL_SENTINEL:
+        exe = _resolve_linux_terminal()
+        if not exe:
+            return (f"I couldn't find a terminal emulator installed sir -- "
+                     f"tried {', '.join(_LINUX_TERMINAL_CANDIDATES)}.")
+    if not IS_WINDOWS and exe not in _LINUX_NO_DISPLAY_REQUIRED and not _linux_display_available():
+        return (f"I can't open {name} sir -- no display server is available in this "
+                 f"session (neither $DISPLAY nor $WAYLAND_DISPLAY is set).")
     try:
         if IS_WINDOWS:
             os.startfile(exe)
@@ -341,6 +377,11 @@ def close_app(name: str) -> str:
     forced kill). Restricted to the same curated app list as launch_app."""
     key = re.sub(r'^(the|a|an)\s+', '', (name or "").strip().lower())
     exe = _APP_ALIASES.get(key)
+    if not IS_WINDOWS and exe == _TERMINAL_SENTINEL:
+        exe = _resolve_linux_terminal()
+        if not exe:
+            return (f"I couldn't find an installed terminal emulator to close sir -- "
+                     f"tried {', '.join(_LINUX_TERMINAL_CANDIDATES)}.")
     # On Linux the binary name doubles as the pkill target; on Windows the
     # process image name is a separate lookup.
     image = (_APP_IMAGE_NAMES.get(exe) if exe else None) if IS_WINDOWS else exe
