@@ -14,6 +14,7 @@
 import os
 import queue
 import threading
+import urllib.parse
 import concurrent.futures
 
 HOME = os.path.expanduser("~")
@@ -79,7 +80,7 @@ def shutdown():
 
 # ================================================================ ACTIONS
 def _do_play_youtube(query, page):
-    page.goto("https://www.youtube.com/results?search_query=" + query.replace(" ", "+"), timeout=20000)
+    page.goto("https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(query), timeout=20000)
     page.wait_for_selector("ytd-video-renderer a#video-title", timeout=15000)
     first = page.locator("ytd-video-renderer a#video-title").first
     title = (first.get_attribute("title") or "").strip()
