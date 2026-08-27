@@ -28,6 +28,10 @@ if sys.stderr is None:
 import os, re, json, time, queue, random, asyncio, webbrowser
 import tempfile, threading, zipfile, urllib.request
 
+from dotenv import load_dotenv
+load_dotenv()  # loads .env into os.environ -- must happen before sms.py/email_watcher.py
+                # read their TWILIO_*/GMAIL_*/USER_PHONE_NUMBER config at import time
+
 import pyaudio, requests, win32com.client
 
 try:
@@ -52,6 +56,8 @@ except ImportError:
 
 import tools
 import brain
+import sms
+import email_watcher
 
 try:
     import browser_control
@@ -215,6 +221,11 @@ def speak(text):
 audio_queue, text_queue = queue.Queue(), queue.Queue()
 interrupt_flag, pipeline_stop = threading.Event(), threading.Event()
 _last_wake_ts = 0.0
+
+# Voice, typed, and SMS commands all end up calling handle_command(), which
+# touches shared TTS/interrupt state (speak(), interrupt_flag). This keeps
+# them from ever running concurrently and corrupting each other.
+_command_lock = threading.Lock()
 
 
 def set_status(text):
@@ -514,45 +525,76 @@ def _reminder_watcher_thread():
     while not pipeline_stop.is_set():
         try:
             for r in tools.due_reminders():
-                speak(f"Reminder sir: {r['text']}")
+                text = f"Reminder sir: {r['text']}"
+                with _command_lock:
+                    speak(text)
+                sms.send_sms(text)
         except Exception as e:
             print(f"  [Reminders] {e}")
         time.sleep(20)
 
 
+def _on_important_email(category, summary):
+    text = f"You've got an important email sir: {summary}"
+    with _command_lock:
+        speak(text)
+    sms.send_sms(f"[Email - {category}] {summary}")
+
+
+def _sms_command_thread():
+    def on_command(body):
+        handle_command(body, acked=True, notify=sms.send_sms)
+    sms.poll_thread(on_command, pipeline_stop)
+
+
+def _email_watch_thread():
+    email_watcher.poll_thread(_on_important_email, pipeline_stop)
+
+
 # ================================================================ COMMAND DISPATCH
-def handle_command(command, acked=False):
-    cmd = command.lower().strip()
+def handle_command(command, acked=False, notify=None):
+    """notify, if given, is called with the final reply text in addition to
+    speaking it aloud -- used to text an SMS-originated command's answer
+    back, regardless of which channel (voice/typed/SMS) the command came
+    from."""
+    with _command_lock:
+        cmd = command.lower().strip()
 
-    if any(t in cmd for t in _TIME_TRIGGERS):
-        return speak(f"The current time is {time.strftime('%I:%M %p').lstrip('0')} sir.")
+        def _reply(text):
+            if notify:
+                try: notify(text)
+                except Exception as e: print(f"  [Notify Error] {e}")
+            return speak(text)
 
-    if any(t in cmd for t in _DATE_TRIGGERS):
-        return speak(f"Today is {time.strftime('%A %B %d')} sir.")
+        if any(t in cmd for t in _TIME_TRIGGERS):
+            return _reply(f"The current time is {time.strftime('%I:%M %p').lstrip('0')} sir.")
 
-    if any(t in cmd for t in _GREETING_TRIGGERS):
-        return speak(random.choice(_GREETING_RESPONSES).replace("{tod}", _time_of_day()))
+        if any(t in cmd for t in _DATE_TRIGGERS):
+            return _reply(f"Today is {time.strftime('%A %B %d')} sir.")
 
-    if any(w in cmd for w in _EXIT_TRIGGERS):
-        speak("Goodbye sir.")
-        return "exit"
+        if any(t in cmd for t in _GREETING_TRIGGERS):
+            return _reply(random.choice(_GREETING_RESPONSES).replace("{tod}", _time_of_day()))
 
-    if cmd in _MEDIA_FAST_PHRASES:
-        return speak(tools.media_control(_MEDIA_FAST_PHRASES[cmd]))
+        if any(w in cmd for w in _EXIT_TRIGGERS):
+            _reply("Goodbye sir.")
+            return "exit"
 
-    cleaned_check = _clean_command(cmd)
-    if len(command.strip()) < 5 or not cleaned_check:
-        return speak("Could you say that again sir? I didn't catch it clearly.")
+        if cmd in _MEDIA_FAST_PHRASES:
+            return _reply(tools.media_control(_MEDIA_FAST_PHRASES[cmd]))
 
-    if not acked:
-        speak(random.choice(_INLINE_CONFIRMS))
+        cleaned_check = _clean_command(cmd)
+        if len(command.strip()) < 5 or not cleaned_check:
+            return _reply("Could you say that again sir? I didn't catch it clearly.")
 
-    set_status("Thinking")
-    reply = brain.run_agent(command, on_activity=_on_brain_activity, on_creation=_on_brain_creation)
-    if reply is None:
-        set_status("Processing (offline)")
-        reply = ask_ollama(command)
-    return speak(reply)
+        if not acked:
+            speak(random.choice(_INLINE_CONFIRMS))
+
+        set_status("Thinking")
+        reply = brain.run_agent(command, on_activity=_on_brain_activity, on_creation=_on_brain_creation)
+        if reply is None:
+            set_status("Processing (offline)")
+            reply = ask_ollama(command)
+        return _reply(reply)
 
 
 # ================================================================ VOICE LOOP
@@ -587,6 +629,8 @@ def voice_loop():
     threading.Thread(target=mic_thread, daemon=True, name="Mic").start()
     threading.Thread(target=recognition_thread, daemon=True, name="Vosk").start()
     threading.Thread(target=_reminder_watcher_thread, daemon=True, name="Reminders").start()
+    threading.Thread(target=_sms_command_thread, daemon=True, name="SMS").start()
+    threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
     time.sleep(0.5)
 
     set_status("Idle")

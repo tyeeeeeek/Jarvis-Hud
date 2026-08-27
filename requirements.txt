@@ -14,3 +14,7 @@ Pillow
 mcp
 playwright
 Send2Trash
+twilio
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
