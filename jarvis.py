@@ -57,6 +57,7 @@ except ImportError:
 import tools
 import brain
 import sms
+import telegram_bridge
 import email_watcher
 
 try:
@@ -521,6 +522,15 @@ def _on_brain_creation(payload):
             pass
 
 
+def _notify_all(text):
+    """Best-effort push to every configured text channel (SMS, Telegram) --
+    used for things Jarvis says unprompted (reminders, important email),
+    not for replying to a specific inbound command (which replies on
+    whichever channel it came from instead)."""
+    sms.send_sms(text)
+    telegram_bridge.send_message(text)
+
+
 def _reminder_watcher_thread():
     while not pipeline_stop.is_set():
         try:
@@ -528,7 +538,7 @@ def _reminder_watcher_thread():
                 text = f"Reminder sir: {r['text']}"
                 with _command_lock:
                     speak(text)
-                sms.send_sms(text)
+                _notify_all(text)
         except Exception as e:
             print(f"  [Reminders] {e}")
         time.sleep(20)
@@ -538,13 +548,19 @@ def _on_important_email(category, summary):
     text = f"You've got an important email sir: {summary}"
     with _command_lock:
         speak(text)
-    sms.send_sms(f"[Email - {category}] {summary}")
+    _notify_all(f"[Email - {category}] {summary}")
 
 
 def _sms_command_thread():
     def on_command(body):
         handle_command(body, acked=True, notify=sms.send_sms)
     sms.poll_thread(on_command, pipeline_stop)
+
+
+def _telegram_command_thread():
+    def on_command(body):
+        handle_command(body, acked=True, notify=telegram_bridge.send_message)
+    telegram_bridge.poll_thread(on_command, pipeline_stop)
 
 
 def _email_watch_thread():
@@ -630,6 +646,7 @@ def voice_loop():
     threading.Thread(target=recognition_thread, daemon=True, name="Vosk").start()
     threading.Thread(target=_reminder_watcher_thread, daemon=True, name="Reminders").start()
     threading.Thread(target=_sms_command_thread, daemon=True, name="SMS").start()
+    threading.Thread(target=_telegram_command_thread, daemon=True, name="Telegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
     time.sleep(0.5)
 

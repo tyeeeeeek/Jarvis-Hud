@@ -156,6 +156,7 @@ venv\Scripts\python.exe jarvis.py
 ├── jarvis_mcp_server.py      # MCP stdio server exposing tools.py to the brain
 ├── browser_control.py        # Dedicated Playwright browser worker (YouTube playback)
 ├── sms.py                    # Twilio SMS bridge — text Jarvis, it texts back
+├── telegram_bridge.py        # Free Telegram bridge — same idea, no Twilio needed
 ├── email_watcher.py          # Gmail polling + importance triage (bills, offers, deliveries)
 ├── self_improve.md           # Instructions + hard guardrails for the nightly agent
 ├── run_self_improve.ps1      # Wrapper the JarvisSelfImprove scheduled task runs
@@ -251,6 +252,31 @@ webhook or exposing your PC to the internet required; it polls Twilio instead.
 
 Texted commands go through the exact same Claude tool-calling brain as voice commands
 — same tools, same safety boundaries — and the reply comes back as a text.
+
+---
+
+## Text Jarvis (Telegram)
+
+Free forever, no card, no Twilio account needed — the tradeoff is you message a bot
+inside the Telegram app instead of getting native texts.
+
+1. Install [Telegram](https://telegram.org) if you don't have it (free, any phone).
+2. In the app, message **@BotFather**, send `/newbot`, and follow the prompts (pick any
+   name/username). It replies with a bot token like `123456:ABC-...`.
+3. Send your new bot literally anything (e.g. "hi") so it knows who you are.
+4. In `.env`, set:
+   ```
+   TELEGRAM_BOT_TOKEN=123456:ABC-...   # from BotFather
+   TELEGRAM_CHAT_ID=...                # see below
+   ```
+   To find your chat ID: with the bot token set, visit
+   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser right after
+   messaging the bot — your chat ID is the number at `result[0].message.chat.id`.
+5. Restart Jarvis. The terminal should print `[Telegram] Watching for messages from
+   chat ...`.
+
+Jarvis only ever acts on messages from that one chat ID — a leaked bot token or a
+guessed username can't hand anyone else command access.
 
 ---
 
