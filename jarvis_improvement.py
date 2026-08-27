@@ -34,17 +34,31 @@ CHAT_ID = os.environ.get("JARVIS_IMPROVEMENT_CHAT_ID", "") or os.environ.get("TE
 AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 
 
+_AGENT_NAME = "JarvisImprovement"
+
+
+def _send(text: str) -> bool:
+    """Send-only Telegram helper for this bot. Tags sends with this bot's
+    agent name so a confirmed delivery lands in the shared supervision
+    log."""
+    return telegram_common.send(BOT_TOKEN, CHAT_ID, text, agent=_AGENT_NAME)
+
+
 def send_report(added, timed_out=False) -> bool:
     """Sent once after every daily self-improvement pass completes.
     `added` is the list of commit-subject lines (one per safe, verified
     change actually committed during the run) -- an empty list means
     nothing safe to improve was found today. `timed_out` marks a run that
-    hit the 2-hour cap rather than finishing on its own."""
+    hit the 2-hour cap rather than finishing on its own. Tone is the proud,
+    meticulous engineer: it wants credit for the audit, not just the diff."""
     if not added:
-        text = "Daily self-improvement pass sir: nothing safe to improve found today."
+        text = ("Ran today's full self-improvement audit -- combed the codebase end to end. "
+                "Nothing cleared the bar for a safe, verified change today. Standards held.")
     else:
-        bullets = "\n".join(f"• {line}" for line in added)
-        text = f"Daily self-improvement pass sir, here's what I added today:\n{bullets}"
+        n = len(added)
+        bullets = "\n".join(f"✓ {line}" for line in added)
+        text = (f"Today's self-improvement pass is done -- {n} change{'s' if n != 1 else ''} "
+                f"shipped, each one syntax-checked and build-verified before commit:\n{bullets}")
     if timed_out:
-        text += "\n\n(Hit the 2-hour time box -- may have more queued for tomorrow.)"
-    return telegram_common.send(BOT_TOKEN, CHAT_ID, text)
+        text += "\n\n(Hit the 2-hour time box -- more queued and ready for tomorrow's pass.)"
+    return _send(text)

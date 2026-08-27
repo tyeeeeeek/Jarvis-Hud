@@ -30,21 +30,27 @@ CHAT_ID = os.environ.get("JARVIS_CPU_ALERTS_CHAT_ID", "") or os.environ.get("TEL
 AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 
 
+_AGENT_NAME = "JarvisCPU_Alerts"
+
+
 def _send(text: str) -> bool:
     """Send-only Telegram helper for this bot. Best-effort -- returns False
     on failure rather than raising, so a network hiccup never crashes the
-    health-check loop."""
-    return telegram_common.send(BOT_TOKEN, CHAT_ID, text)
+    health-check loop. Tags sends with this bot's agent name so a
+    confirmed delivery lands in the shared supervision log."""
+    return telegram_common.send(BOT_TOKEN, CHAT_ID, text, agent=_AGENT_NAME)
 
 
 def send_summary(result_text: str) -> bool:
     """Sent once after every scheduled health check completes, regardless of
-    whether anything was wrong -- a routine PC health status update."""
-    return _send(f"PC health check sir: {result_text}")
+    whether anything was wrong -- a routine PC health status update. Tone is
+    the blunt, no-nonsense watchdog: it reports the numbers, not feelings."""
+    return _send(f"WATCHDOG CHECK — {result_text}")
 
 
 def send_critical_alert(result_text: str) -> bool:
     """Sent immediately the moment check_system_health() flags a critical
     issue (overheating risk or critically low disk space), instead of
-    waiting for the next scheduled summary."""
-    return _send(f"⚠️ Critical PC health alert sir: {result_text}")
+    waiting for the next scheduled summary. Tone stays blunt -- no
+    hedging on something that actually needs action."""
+    return _send(f"⚠️ WATCHDOG ALERT — fix this now: {result_text}")
