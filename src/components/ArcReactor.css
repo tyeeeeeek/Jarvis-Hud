@@ -82,11 +82,11 @@ html, body, #root {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 160px;
-  height: 160px;
+  width: clamp(160px, 15vmin, 420px);
+  height: clamp(160px, 15vmin, 420px);
   border-radius: 50%;
   background: transparent;
-  border: 2px solid rgba(0,240,255,0.6);
+  border: clamp(2px, 0.2vmin, 4px) solid rgba(0,240,255,0.6);
   transform: translate(-50%, -50%) scale(var(--core-scale, 1));
   box-shadow:
     0 0 var(--glow-radius, 20px) rgba(0,240,255, var(--glow-opacity, 0.3)),
@@ -104,8 +104,8 @@ html, body, #root {
 }
 
 .arc-reactor__haze {
-  width: 220px;
-  height: 220px;
+  width: clamp(220px, 20vmin, 560px);
+  height: clamp(220px, 20vmin, 560px);
   border-radius: 50%;
   background: radial-gradient(circle, rgba(0,240,255,0.12), transparent 70%);
   filter: blur(18px);
@@ -119,32 +119,32 @@ html, body, #root {
   transform: translateX(-50%);
   color: rgba(0,240,255,0.65);
   font-family: monospace;
-  font-size: 11px;
+  font-size: clamp(11px, 1.2vmin, 22px);
   letter-spacing: 4px;
   text-shadow: 0 0 10px rgba(0,240,255,0.4);
   z-index: 20;
   pointer-events: none;
 }
 
-.arc-reactor__orbit-rings { width: 420px; height: 420px; }
+.arc-reactor__orbit-rings { width: clamp(420px, 38vmin, 980px); height: clamp(420px, 38vmin, 980px); }
 .arc-reactor__orbit { position: absolute; inset: 0; border-radius: 50%; }
 .arc-reactor__orbit--1 {
-  border: 3px solid transparent;
-  border-top: 3px solid #00f0ff;
-  border-right: 3px solid #00f0ff;
+  border: clamp(3px, 0.3vmin, 6px) solid transparent;
+  border-top: clamp(3px, 0.3vmin, 6px) solid #00f0ff;
+  border-right: clamp(3px, 0.3vmin, 6px) solid #00f0ff;
   box-shadow: 0 0 20px rgba(0,240,255,0.35);
   animation: orbitCW 12s linear infinite;
 }
 .arc-reactor__orbit--2 {
-  inset: 20px;
-  border: 2px solid transparent;
-  border-left: 2px solid #7fdfff;
-  border-bottom: 2px solid #7fdfff;
+  inset: 5%;
+  border: clamp(2px, 0.2vmin, 4px) solid transparent;
+  border-left: clamp(2px, 0.2vmin, 4px) solid #7fdfff;
+  border-bottom: clamp(2px, 0.2vmin, 4px) solid #7fdfff;
   box-shadow: 0 0 12px rgba(127,223,255,0.3);
   animation: orbitCCW 8s linear infinite;
 }
 .arc-reactor__orbit--3 {
-  inset: 50px;
+  inset: 12%;
   border: 1px solid rgba(0,240,255,0.3);
   box-shadow: 0 0 8px rgba(0,240,255,0.2);
   animation: orbitCW 20s linear infinite;
@@ -156,8 +156,8 @@ html, body, #root {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 200px;
-  height: 200px;
+  width: clamp(200px, 18vmin, 500px);
+  height: clamp(200px, 18vmin, 500px);
   border-radius: 50%;
   border: 1px solid rgba(0,240,255,0.3);
   animation: pulseRing 2.8s ease-out infinite;
@@ -174,8 +174,8 @@ html, body, #root {
   top: 50%;
   left: 50%;
   transform: translate(-50%,-50%);
-  width: 300px;
-  height: 300px;
+  width: clamp(300px, 28vmin, 760px);
+  height: clamp(300px, 28vmin, 760px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -192,18 +192,18 @@ html, body, #root {
 }
 .arc-reactor__core-shell {
   position: absolute;
-  width: 180px;
-  height: 180px;
+  width: 60%;
+  height: 60%;
   inset: 0;
   margin: auto;
   border-radius: 50%;
-  border: 2px solid rgba(0,240,255,0.55);
+  border: clamp(2px, 0.2vmin, 4px) solid rgba(0,240,255,0.55);
   box-shadow: 0 0 20px rgba(0,240,255,0.2), inset 0 0 12px rgba(0,240,255,0.1);
 }
 .arc-reactor__core-inner {
   position: absolute;
-  width: 140px;
-  height: 140px;
+  width: 47%;
+  height: 47%;
   inset: 0;
   margin: auto;
   border-radius: 50%;
@@ -215,7 +215,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: clamp(14px, 1.8vmin, 32px);
   letter-spacing: 5px;
   color: #66ffff;
   text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff;
@@ -234,15 +234,15 @@ html, body, #root {
 }
 .hud-time {
   font-family: monospace;
-  font-size: 60px;
+  font-size: clamp(60px, 8vmin, 180px);
   letter-spacing: 10px;
   color: rgba(0,240,255,0.45);
   text-shadow: 0 0 8px rgba(0,240,255,0.25);
 }
 .hud-date {
-  margin-top: 30px;
+  margin-top: clamp(20px, 2vmin, 40px);
   font-family: monospace;
-  font-size: 20px;
+  font-size: clamp(20px, 2.2vmin, 46px);
   letter-spacing: 3px;
   color: rgba(0,240,255,0.25);
   text-transform: uppercase;

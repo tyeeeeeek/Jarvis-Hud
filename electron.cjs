@@ -67,12 +67,16 @@ function startPython() {
 }
 
 function createWindow() {
-  // Size to the actual display's work area (not a fixed 1400x900) so the HUD
-  // fills the screen it's launched on -- a NUC hooked up to a TV has a much
-  // bigger work area than a laptop panel, and the widget layout in
-  // ArcReactor.tsx positions everything as a percentage of window size, so
-  // it only spreads out correctly once the window itself is full-size.
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  // Size to the actual display (not a fixed 1400x900) so the HUD fills the
+  // screen it's launched on -- a NUC hooked up to a TV has a much bigger
+  // display than a laptop panel, and the widget layout in ArcReactor.tsx
+  // positions everything as a percentage of window size, so it only spreads
+  // out correctly once the window itself is full-size. Use the full display
+  // bounds (not workAreaSize) and real OS fullscreen rather than maximize()
+  // -- maximize() is a request the window manager can partially honor or
+  // race on (seen on GNOME/Mutter: window ended up sized ~90% of the
+  // display, off-center), where fullscreen is an exact, unambiguous state.
+  const { width, height } = screen.getPrimaryDisplay().bounds;
 
   mainWindow = new BrowserWindow({
     width,
@@ -110,7 +114,7 @@ function createWindow() {
   }
 
   mainWindow.once("ready-to-show", () => {
-    mainWindow.maximize();
+    mainWindow.setFullScreen(true);
     mainWindow.show();
   });
 
