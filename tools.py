@@ -41,6 +41,11 @@ except ImportError:
     STATEMENTS_AVAILABLE = False
 
 try:
+    import telegram_bridge; TELEGRAM_AVAILABLE = True
+except ImportError:
+    TELEGRAM_AVAILABLE = False
+
+try:
     import browser_control; BROWSER_CONTROL_AVAILABLE = True
 except ImportError:
     BROWSER_CONTROL_AVAILABLE = False
@@ -519,22 +524,37 @@ def clean_disk() -> str:
 
 # ================================================================ FINANCE (unchanged services, thin wrappers)
 def sync_bank_data() -> str:
-    """Sync the latest bank transactions from CSV statements dropped in the
-    JarvisStatements folder."""
+    """Sync the latest bank transactions into Jarvis's records. Call this on
+    any "sync statements", "sync my bank data", or "import my statements"
+    request. First imports whatever file(s) the user has most recently sent
+    as an attachment to the Telegram bot into the "latest bank statements"
+    folder, then parses every CSV statement (that folder plus anything
+    dropped directly in JarvisStatements) into the local transaction store
+    that get_spending_summary reads from."""
     if not STATEMENTS_AVAILABLE:
         return "Statement syncing isn't set up sir."
+    imported = []
+    if TELEGRAM_AVAILABLE:
+        try:
+            imported = telegram_bridge.import_latest_to(statements_service.LATEST_STATEMENTS_DIR)
+        except Exception as e:
+            print(f"  [Statements] Telegram import error: {e}")
     try:
         result = statements_service.sync()
     except Exception as e:
         return f"I couldn't sync your statements sir: {e}"
     if result["files_seen"] == 0:
-        return "I didn't find any statement files to sync sir. Drop your CSVs in the JarvisStatements folder first."
-    return f"Synced sir. Found {result['new_transactions']} new transactions across {result['files_seen']} files."
+        return ("I didn't find any statement files to sync sir. Send one to the Telegram bot "
+                 "or drop your CSVs in the JarvisStatements folder first.")
+    prefix = f"Imported {len(imported)} file(s) you sent over Telegram and synced sir. " if imported else "Synced sir. "
+    return f"{prefix}Found {result['new_transactions']} new transactions across {result['files_seen']} files."
 
 
 def get_spending_summary() -> str:
-    """Summarize the user's spending over the last 30 days by category, from
-    synced bank statements or a linked Plaid account."""
+    """Answer any financial question about spending, budgets, categories, or
+    trends -- summarizes the last 30 days by category and merchant, how that
+    compares to the prior 30 days, from synced bank statements (including
+    ones imported via Telegram) or a linked Plaid account."""
     summary = None
     if STATEMENTS_AVAILABLE and statements_service.has_data():
         try:
@@ -547,12 +567,19 @@ def get_spending_summary() -> str:
         except Exception as e:
             return f"I couldn't reach Plaid just now sir: {e}"
     if summary is None:
-        return "I don't have any spending data yet sir. Drop bank statements in the JarvisStatements folder and sync, or connect a bank in the Finance widget."
+        return ("I don't have any spending data yet sir. Send me a bank statement over Telegram "
+                 "and say sync statements, drop CSVs in the JarvisStatements folder, or connect a "
+                 "bank in the Finance widget.")
     if not summary["by_category"]:
         return "No transactions found for the last thirty days sir."
     top = summary["by_category"][0]
+    trend_note = ""
+    change_pct = summary.get("change_pct")
+    if change_pct is not None:
+        direction = "up" if change_pct > 0 else "down"
+        trend_note = f" That's {direction} {abs(change_pct):.0f} percent from the prior thirty days."
     return (f"Over the last thirty days you've spent {summary['total_spent']:.0f} dollars sir, "
-            f"most of it on {top['name']}, about {top['amount']:.0f} dollars.")
+            f"most of it on {top['name']}, about {top['amount']:.0f} dollars.{trend_note}")
 
 
 # ================================================================ EYES (screen vision, off by default, on-demand only)

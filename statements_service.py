@@ -2,9 +2,12 @@
 #   Local bank statement import — no API, no account linking.
 #
 #   Drop CSV exports from your bank/card's own website into
-#   ~/JarvisStatements and say "Jarvis sync my bank data". Everything
-#   is parsed and stored locally (statements_ledger.json); nothing
-#   here ever leaves this machine.
+#   ~/JarvisStatements (or send them to the Telegram bot and say
+#   "sync statements" -- see telegram_bridge.import_latest_to, which
+#   lands them in the "latest bank statements" subfolder below) and
+#   say "Jarvis sync my bank data". Everything is parsed and stored
+#   locally (statements_ledger.json); nothing here ever leaves this
+#   machine.
 # ================================================================
 import os
 import csv
@@ -15,6 +18,7 @@ from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATEMENTS_DIR = os.path.join(os.path.expanduser("~"), "JarvisStatements")
+LATEST_STATEMENTS_DIR = os.path.join(STATEMENTS_DIR, "latest bank statements")
 LEDGER_PATH = os.path.join(BASE_DIR, "statements_ledger.json")
 
 _DATE_KEYS = ["date", "transaction date", "posted date", "post date"]
@@ -28,12 +32,16 @@ _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y")
 
 def ensure_statements_dir():
     os.makedirs(STATEMENTS_DIR, exist_ok=True)
+    os.makedirs(LATEST_STATEMENTS_DIR, exist_ok=True)
     readme = os.path.join(STATEMENTS_DIR, "README.txt")
     if not os.path.exists(readme):
         with open(readme, "w") as f:
             f.write(
                 "Drop your bank/card CSV exports here (SoFi, Capital One, Discover, etc.), "
                 "then say 'Jarvis sync my bank data'.\n\n"
+                "Files sent as attachments to the Telegram bot land in the "
+                "'latest bank statements' subfolder automatically once you say "
+                "'sync statements'.\n\n"
                 "These files are read locally only -- nothing in this folder is ever "
                 "uploaded anywhere.\n"
             )
@@ -151,7 +159,10 @@ def sync():
     ledger = _load_ledger()
     new_count = 0
     files_seen = 0
-    for path in glob.glob(os.path.join(STATEMENTS_DIR, "*.csv")):
+    # Recursive so files imported into the "latest bank statements"
+    # subfolder (via telegram_bridge.import_latest_to) get picked up too,
+    # not just ones dropped directly in STATEMENTS_DIR.
+    for path in glob.glob(os.path.join(STATEMENTS_DIR, "**", "*.csv"), recursive=True):
         files_seen += 1
         for tx in _parse_csv_file(path):
             fp = _fingerprint(tx["date"], tx["description"], tx["amount"])
@@ -167,19 +178,36 @@ def has_data():
 
 
 def get_spending_summary(days=30):
+    """Category/merchant breakdown for the last `days`, plus how that
+    compares to the prior period of equal length (change_pct) and a
+    month-by-month trend across all imported history (monthly_trend) --
+    the "richer insight" data the finance dashboard and financial Q&A
+    tools are grounded in."""
     ledger = _load_ledger()
     if not ledger:
         return None
-    cutoff = datetime.now().date() - timedelta(days=days)
-    by_category, by_merchant = {}, {}
+    today = datetime.now().date()
+    cutoff = today - timedelta(days=days)
+    prev_cutoff = cutoff - timedelta(days=days)
+    by_category, by_merchant, by_month = {}, {}, {}
     total_spent = 0.0
+    previous_spent = 0.0
 
     for tx in ledger.values():
-        if datetime.strptime(tx["date"], "%Y-%m-%d").date() < cutoff:
-            continue
+        tx_date = datetime.strptime(tx["date"], "%Y-%m-%d").date()
         amount = tx["amount"]
         if amount <= 0:
+            continue  # refunds/deposits, not spending
+
+        # Month-over-month trend spans the whole ledger, independent of
+        # the `days` window used for the category/merchant breakdown.
+        by_month[tx["date"][:7]] = by_month.get(tx["date"][:7], 0.0) + amount
+
+        if tx_date < cutoff:
+            if tx_date >= prev_cutoff:
+                previous_spent += amount
             continue
+
         category = tx["category"] or "Uncategorized"
         by_category[category] = by_category.get(category, 0.0) + amount
         by_merchant[tx["description"]] = by_merchant.get(tx["description"], 0.0) + amount
@@ -187,9 +215,18 @@ def get_spending_summary(days=30):
 
     top_categories = sorted(by_category.items(), key=lambda x: -x[1])[:8]
     top_merchants = sorted(by_merchant.items(), key=lambda x: -x[1])[:8]
+    trend = sorted(by_month.items())[-6:]  # last up to 6 calendar months present in the data
+
+    change_pct = None
+    if previous_spent > 0:
+        change_pct = round((total_spent - previous_spent) / previous_spent * 100, 1)
+
     return {
         "period_days": days,
         "total_spent": round(total_spent, 2),
+        "previous_period_spent": round(previous_spent, 2),
+        "change_pct": change_pct,
         "by_category": [{"name": n, "amount": round(a, 2)} for n, a in top_categories],
         "top_merchants": [{"name": n, "amount": round(a, 2)} for n, a in top_merchants],
+        "monthly_trend": [{"month": m, "amount": round(a, 2)} for m, a in trend],
     }

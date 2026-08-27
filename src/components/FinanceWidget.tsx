@@ -17,8 +17,11 @@ declare global {
 interface Summary {
   period_days: number;
   total_spent: number;
+  previous_period_spent?: number;
+  change_pct?: number | null;
   by_category: { name: string; amount: number }[];
   top_merchants: { name: string; amount: number }[];
+  monthly_trend?: { month: string; amount: number }[];
 }
 
 type Source = "statements" | "plaid";
@@ -116,7 +119,7 @@ export function FinanceWidget() {
       {status === "error" && <span className="w-error">SENSOR OFFLINE</span>}
       {status === "not_configured" && (
         <>
-          <span className="w-idle">DROP CSVs IN JARVISSTATEMENTS FOLDER</span>
+          <span className="w-idle">DROP CSVs IN JARVISSTATEMENTS, OR SEND VIA TELEGRAM</span>
           <div className="w-divider" />
           <button className="w-fin-connect" onClick={syncStatements}>SYNC STATEMENTS</button>
         </>
@@ -140,7 +143,12 @@ export function FinanceWidget() {
             <span className="w-temp">${summary.total_spent.toFixed(0)}</span>
             <div className="w-cond-block">
               <span className="w-cond">TOTAL SPENT</span>
-              <span className="w-feels">{summary.by_category.length} CATEGORIES</span>
+              <span className="w-feels">
+                {summary.by_category.length} CATEGORIES
+                {typeof summary.change_pct === "number" && (
+                  <> · {summary.change_pct > 0 ? "▲" : summary.change_pct < 0 ? "▼" : "–"} {Math.abs(summary.change_pct).toFixed(0)}% VS PRIOR 30D</>
+                )}
+              </span>
             </div>
           </div>
 
@@ -152,6 +160,21 @@ export function FinanceWidget() {
               <span className="w-stat-val">${c.amount.toFixed(0)}</span>
             </div>
           ))}
+
+          {summary.monthly_trend && summary.monthly_trend.length > 1 && (
+            <>
+              <div className="w-divider" />
+              <div className="w-row w-row--spread">
+                <span className="w-stat-lbl">TREND</span>
+              </div>
+              {summary.monthly_trend.map((m) => (
+                <div className="w-row w-row--spread" key={m.month}>
+                  <span className="w-stat-lbl">{m.month}</span>
+                  <span className="w-stat-val">${m.amount.toFixed(0)}</span>
+                </div>
+              ))}
+            </>
+          )}
 
           <div className="w-divider" />
           <div className="w-row w-row--spread">
