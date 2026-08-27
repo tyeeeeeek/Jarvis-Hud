@@ -314,6 +314,36 @@ Fully inert (no-op, no errors) until `JARVIS_CPU_ALERTS_BOT_TOKEN` is set.
 
 ---
 
+## Daily self-improvement reports (JarvisImprovement)
+
+A third dedicated, send-only Telegram bot — separate from the command bot and
+JarvisCPU_Alerts — just for the once-a-day summary of what the scheduled
+self-improvement pass (see "24/7 self-improvement" below) safely added. It
+sends exactly one message a day, right after that pass finishes:
+
+- A bullet list of what got added, if anything.
+- Or "nothing safe to improve found today" if the pass ran and genuinely
+  found nothing worth doing.
+
+It's send-only: it never polls for incoming messages or accepts commands, so
+a leaked token can only be used to spam that one chat.
+
+1. Message **@BotFather** in Telegram, send `/newbot`, and follow the prompts
+   to get a new bot token (a *different* bot than the ones used above, so
+   this report stays on its own channel).
+2. Send that new bot anything so it knows who you are.
+3. In `.env`, set:
+   ```
+   JARVIS_IMPROVEMENT_BOT_TOKEN=123456:XYZ-...   # from BotFather
+   JARVIS_IMPROVEMENT_CHAT_ID=                   # leave blank to reuse TELEGRAM_CHAT_ID
+   ```
+4. Restart Jarvis. No separate startup log line needed — it's called
+   directly from `_improvement_watcher_thread` once the daily pass finishes.
+
+Fully inert (no-op, no errors) until `JARVIS_IMPROVEMENT_BOT_TOKEN` is set.
+
+---
+
 ## Watch my email
 
 Jarvis can watch your inbox and proactively tell you (voice + text) about anything
@@ -376,10 +406,23 @@ in-app "quit backend" command — worth adding if you find yourself doing this o
 
 ## 24/7 self-improvement
 
-A Windows Scheduled Task (`JarvisSelfImprove`, nightly at 3 AM) runs Claude Code
-autonomously against this project folder to find and fix bugs, tidy things up, and add
-small useful capabilities — with full local file/command access and **no approval
-step**, per your call on how much autonomy to give it.
+As long as the always-on backend (`jarvis.py`) is running, a background thread
+(`_improvement_watcher_thread`) fires once every 24 hours, starting at **6 AM local
+time**, and runs Claude Code autonomously against this project folder for **up to 2
+hours** to find and fix bugs, tidy things up, and add small useful capabilities — with
+full local file/command access and **no approval step**, per your call on how much
+autonomy to give it. This is cross-platform (plain Python scheduling, no OS task
+scheduler needed) and reuses the exact same mechanism as the on-demand "Jarvis,
+improve on..." command (`tools.run_daily_self_improve()` / `self_improve.md`), just
+unfocused and time-boxed instead of scoped to one thing you asked for live. When it
+finishes — whether it made changes, found nothing safe to improve, or hit the 2-hour
+cap — the **JarvisImprovement** Telegram bot (see above) sends a one-message summary
+of whatever got added that day.
+
+On Windows, a Scheduled Task (`JarvisSelfImprove`, historically nightly at 3 AM) can
+also run the same pass via `run_self_improve.ps1` if you'd rather trigger it outside
+`jarvis.py`'s own scheduling — the two aren't mutually exclusive, but running both
+means two passes a day.
 
 What keeps this from being reckless:
 - **Hard-coded guardrails it cannot override** (see `self_improve.md`): it can never

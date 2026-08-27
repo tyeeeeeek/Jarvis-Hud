@@ -972,3 +972,82 @@ def self_improve(focus: str) -> str:
         "summary": summary[-800:] if summary else "No summary returned.",
         "latest_commit": latest_commit,
     })
+
+
+# ================================================================ SCHEDULED DAILY SELF-IMPROVEMENT
+# Same self_improve.md-driven mechanism as the on-demand self_improve(focus)
+# above, but unfocused (it picks its own candidate improvements, same as
+# the nightly pass this project was designed around) and time-boxed to a
+# fixed daily window. Never exposed to the brain as a tool -- only called
+# from jarvis.py's _improvement_watcher_thread (JarvisImprovement
+# sub-agent), which schedules it once every 24 hours starting at 6 AM
+# local time. NOT in jarvis_mcp_server.py's _TOOL_FUNCS on purpose: this
+# takes no user input and must never be voice/text-triggerable, only
+# scheduler-triggerable.
+_DAILY_IMPROVE_TIMEOUT_SECONDS = 2 * 60 * 60  # up to 2 hours, per the 6 AM window
+
+
+def run_daily_self_improve() -> dict:
+    """Runs self_improve.md's autonomous pass (find + apply safe, verified
+    improvements, same hard constraints and build/syntax gate as
+    self_improve(focus)) for up to 2 hours, then reports which commits it
+    actually made. Returns {"ok", "added" (list of commit-subject lines
+    made during this run, empty if nothing safe was found), "timed_out"}."""
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    if not os.path.exists(CLAUDE_CLI):
+        return {"ok": False, "added": [], "timed_out": False, "message": "Claude Code not found."}
+
+    try:
+        with open(os.path.join(project_dir, "self_improve.md"), "r", encoding="utf-8") as f:
+            prompt = f.read()
+    except Exception as e:
+        return {"ok": False, "added": [], "timed_out": False, "message": f"Couldn't read self_improve.md: {e}"}
+
+    try:
+        start = subprocess.run(["git", "-C", project_dir, "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=10)
+        start_commit = start.stdout.strip()
+    except Exception as e:
+        return {"ok": False, "added": [], "timed_out": False, "message": f"git rev-parse failed: {e}"}
+
+    timed_out = False
+    try:
+        subprocess.run(
+            [CLAUDE_CLI, "-p", prompt,
+             "--permission-mode", "bypassPermissions",
+             "--tools", "Read Write Edit Glob Grep Bash",
+             "--allowedTools", "Read Write Edit Glob Grep Bash"],
+            cwd=project_dir, capture_output=True, text=True,
+            timeout=_DAILY_IMPROVE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    except Exception as e:
+        return {"ok": False, "added": [], "timed_out": False, "message": f"Run failed: {e}"}
+
+    # Safety net: if the pass made changes but didn't commit them (crashed
+    # mid-run, or got cut off right at the time-box), capture them anyway
+    # rather than losing the work or leaving the working tree dirty for
+    # tomorrow's run -- same net run_self_improve.ps1 uses.
+    try:
+        subprocess.run(["git", "-C", project_dir, "add", "-A"],
+                        capture_output=True, text=True, timeout=30)
+        status = subprocess.run(["git", "-C", project_dir, "status", "--porcelain"],
+                                 capture_output=True, text=True, timeout=10)
+        if status.stdout.strip():
+            subprocess.run(
+                ["git", "-C", project_dir, "commit", "-m",
+                 "auto-wrapper: uncommitted changes from JarvisImprovement daily run"],
+                capture_output=True, text=True, timeout=30)
+    except Exception:
+        pass
+
+    try:
+        log = subprocess.run(
+            ["git", "-C", project_dir, "log", f"{start_commit}..HEAD", "--format=%s"],
+            capture_output=True, text=True, timeout=10)
+        added = [line.strip() for line in log.stdout.splitlines() if line.strip()]
+    except Exception:
+        added = []
+
+    return {"ok": True, "added": added, "timed_out": timed_out}

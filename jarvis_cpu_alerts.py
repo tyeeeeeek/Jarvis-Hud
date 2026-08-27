@@ -22,11 +22,10 @@
 # ================================================================
 import os
 
-import requests
+import telegram_common
 
 BOT_TOKEN = os.environ.get("JARVIS_CPU_ALERTS_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("JARVIS_CPU_ALERTS_CHAT_ID", "") or os.environ.get("TELEGRAM_CHAT_ID", "")
-API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 
@@ -35,16 +34,7 @@ def _send(text: str) -> bool:
     """Send-only Telegram helper for this bot. Best-effort -- returns False
     on failure rather than raising, so a network hiccup never crashes the
     health-check loop."""
-    if not AVAILABLE or not text:
-        return False
-    try:
-        r = requests.post(f"{API_BASE}/sendMessage", json={
-            "chat_id": CHAT_ID, "text": text[:4000],
-        }, timeout=15)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"  [JarvisCPU_Alerts] Send error: {e}")
-        return False
+    return telegram_common.send(BOT_TOKEN, CHAT_ID, text)
 
 
 def send_summary(result_text: str) -> bool:

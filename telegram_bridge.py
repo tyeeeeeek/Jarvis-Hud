@@ -26,6 +26,8 @@ import shutil
 
 import requests
 
+import telegram_common
+
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -48,16 +50,7 @@ _ALLOWED_EXTS = {".csv", ".txt", ".ofx", ".qfx"}
 def send_message(text: str) -> bool:
     """Message the configured chat. Best-effort -- returns False on failure
     rather than raising, so a network hiccup never crashes a command."""
-    if not TELEGRAM_AVAILABLE or not text:
-        return False
-    try:
-        r = requests.post(f"{API_BASE}/sendMessage", json={
-            "chat_id": CHAT_ID, "text": text[:4000],
-        }, timeout=15)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"  [Telegram] Send error: {e}")
-        return False
+    return telegram_common.send(BOT_TOKEN, CHAT_ID, text)
 
 
 def _sanitize_filename(name):

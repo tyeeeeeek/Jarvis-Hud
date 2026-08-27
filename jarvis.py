@@ -27,6 +27,7 @@ if sys.stderr is None:
 
 import os, re, json, time, queue, random, asyncio, webbrowser, socket
 import tempfile, threading, zipfile, urllib.request, shutil, subprocess
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()  # loads .env into os.environ -- must happen before sms.py/email_watcher.py
@@ -65,6 +66,7 @@ import brain
 import sms
 import telegram_bridge
 import jarvis_cpu_alerts
+import jarvis_improvement
 import email_watcher
 
 try:
@@ -630,6 +632,37 @@ def _health_watcher_thread():
             break
 
 
+_IMPROVEMENT_START_HOUR = 6
+_IMPROVEMENT_START_MINUTE = 0
+
+
+def _improvement_watcher_thread():
+    """JarvisImprovement sub-agent: once every 24 hours, starting at 6 AM
+    local time, runs tools.run_daily_self_improve() -- the same
+    self_improve.md-driven mechanism (and hard constraints/build-verify
+    gate) as the on-demand "Jarvis, improve on..." command, but unfocused
+    and capped at up to 2 hours -- then reports whatever it safely added
+    over Telegram via the dedicated JarvisImprovement bot. Runs silently:
+    no voice/_notify_all output during the pass itself, only the
+    end-of-run Telegram summary, so it never interrupts anything."""
+    while not pipeline_stop.is_set():
+        now = datetime.now()
+        target = now.replace(hour=_IMPROVEMENT_START_HOUR, minute=_IMPROVEMENT_START_MINUTE,
+                              second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        if pipeline_stop.wait((target - now).total_seconds()):
+            break
+        try:
+            result = tools.run_daily_self_improve()
+        except Exception as e:
+            print(f"  [JarvisImprovement] {e}")
+            continue
+        print(f"  [JarvisImprovement] {result}")
+        if result.get("ok"):
+            jarvis_improvement.send_report(result.get("added", []), result.get("timed_out", False))
+
+
 def _on_important_email(category, summary):
     text = f"You've got an important email sir: {summary}"
     with _command_lock:
@@ -738,6 +771,7 @@ def voice_loop():
     threading.Thread(target=recognition_thread, daemon=True, name="Vosk").start()
     threading.Thread(target=_reminder_watcher_thread, daemon=True, name="Reminders").start()
     threading.Thread(target=_health_watcher_thread, daemon=True, name="Health").start()
+    threading.Thread(target=_improvement_watcher_thread, daemon=True, name="Improvement").start()
     threading.Thread(target=_sms_command_thread, daemon=True, name="SMS").start()
     threading.Thread(target=_telegram_command_thread, daemon=True, name="Telegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
