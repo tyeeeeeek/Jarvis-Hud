@@ -35,30 +35,82 @@ def _ensure_worker():
         _worker_started = True
 
 
-def _submit(fn, timeout=45):
-    """Run fn(page) on the worker thread, block for the result."""
+def _submit(fn, timeout=45, relaunch=True):
+    """Run fn(page) on the worker thread, block for the result.
+
+    relaunch=False is used for playback controls (play/pause, mute, ...): if
+    the window has been closed or crashed there is nothing to control, so we
+    raise a clear error instead of popping open a fresh blank browser window.
+    """
     _ensure_worker()
     fut: concurrent.futures.Future = concurrent.futures.Future()
-    _request_q.put((fn, fut))
+    _request_q.put((fn, fut, relaunch))
     return fut.result(timeout=timeout)
+
+
+def _clear_stale_singleton_files():
+    """If Chromium was killed or crashed instead of exiting cleanly, it can
+    leave SingletonLock/SingletonCookie/SingletonSocket behind in the profile
+    dir. A leftover lock makes the *next* launch_persistent_context fail
+    outright, which used to permanently break playback until the whole app
+    was restarted -- clear it before every (re)launch."""
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        path = os.path.join(PROFILE_DIR, name)
+        try:
+            if os.path.exists(path) or os.path.islink(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _launch_context(p):
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    _clear_stale_singleton_files()
+    context = p.chromium.launch_persistent_context(
+        PROFILE_DIR, headless=False,
+        args=[
+            "--window-size=900,700", "--window-position=100,100",
+            # Windows suspends/throttles occluded (covered or minimized)
+            # Chromium windows by default, which can make an unattended
+            # playback window look stalled or dead -- keep it running.
+            "--disable-features=CalculateNativeWinOcclusion",
+        ],
+    )
+    page = context.pages[0] if context.pages else context.new_page()
+    return context, page
+
+
+def _is_usable(page):
+    if page is None:
+        return False
+    try:
+        return not page.is_closed()
+    except Exception:
+        return False
 
 
 def _worker_thread():
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        os.makedirs(PROFILE_DIR, exist_ok=True)
-        context = p.chromium.launch_persistent_context(
-            PROFILE_DIR, headless=False,
-            args=["--window-size=900,700", "--window-position=100,100"],
-        )
-        page = context.pages[0] if context.pages else context.new_page()
+        context = page = None
 
         while True:
-            fn, fut = _request_q.get()
+            fn, fut, relaunch = _request_q.get()
             if fn is None:  # shutdown sentinel
                 break
             try:
+                if not _is_usable(page):
+                    if not relaunch:
+                        raise RuntimeError("no YouTube window is currently open")
+                    # The window was closed by the user or Chromium crashed --
+                    # transparently relaunch instead of leaving playback dead.
+                    if context is not None:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+                    context, page = _launch_context(p)
                 result = fn(page)
                 if not fut.done():
                     fut.set_result(result)
@@ -66,16 +118,17 @@ def _worker_thread():
                 if not fut.done():
                     fut.set_exception(e)
 
-        try:
-            context.close()
-        except Exception:
-            pass
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 def shutdown():
     """Best-effort graceful close, called from jarvis.py on exit."""
     if _worker_started:
-        _request_q.put((None, concurrent.futures.Future()))
+        _request_q.put((None, concurrent.futures.Future(), True))
 
 
 # ================================================================ ACTIONS
@@ -115,8 +168,10 @@ def control(action: str) -> str:
     if action not in ("play_pause", "next", "mute"):
         return "I can play/pause, restart, or mute the YouTube tab sir."
     try:
-        _submit(lambda page: _do_control(action, page), timeout=15)
+        _submit(lambda page: _do_control(action, page), timeout=15, relaunch=False)
         return {"play_pause": "Toggling playback sir.", "next": "Restarting the video sir.",
                 "mute": "Muting sir."}[action]
     except Exception as e:
+        if "no YouTube window is currently open" in str(e):
+            return "There's no YouTube video playing right now sir."
         return f"I couldn't control the YouTube tab sir: {e}"
