@@ -1,0 +1,15 @@
+node_modules/
+dist/
+venv/
+__pycache__/
+*.pyc
+vosk-model-*/
+token*.json
+credentials.json
+.env
+.jarvis_key
+plaid_store.enc
+.DS_Store
+.jarvis/
+.jarvis-browser-profile/
+statements_ledger.json

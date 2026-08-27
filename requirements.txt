@@ -1,0 +1,16 @@
+pyaudio
+requests
+pywin32
+vosk
+websockets
+edge-tts
+pygame
+plaid-python
+python-dotenv
+cryptography
+flask
+flask-cors
+Pillow
+mcp
+playwright
+Send2Trash

@@ -1,0 +1,196 @@
+# ================================================================
+#   J.A.R.V.I.S — Brain (Claude Code CLI tool-calling orchestration)
+#
+#   Runs one voice command through the Claude Code CLI, restricted
+#   to exactly the tools in jarvis_mcp_server.py and nothing else
+#   (verified empirically -- see notes below), streams the event
+#   log so the HUD gets a live "what Jarvis is doing" caption, and
+#   returns the final spoken reply.
+#
+#   Safety note: --allowedTools alone is NOT a hard restriction --
+#   it only affects permission prompting, and this machine's normal
+#   Claude Code settings already broadly allow tools like Bash. The
+#   actual lockdown is `--tools ""` (disables every built-in tool)
+#   plus `--mcp-config ... --strict-mcp-config` (only our own MCP
+#   server, ignoring any other MCP servers configured globally)
+#   plus `--allowedTools "mcp__jarvis__*"` (pre-authorizes just our
+#   tools so they don't need an interactive prompt that can never
+#   be answered in headless mode). All three together were verified
+#   live: Bash is completely unavailable to this call, and only the
+#   jarvis__* tools exist.
+# ================================================================
+import os, json, tempfile, subprocess, threading
+
+HOME = os.path.expanduser("~")
+CLAUDE_CLI = os.path.join(HOME, ".local", "bin", "claude.exe")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+VENV_PYTHON = os.path.join(_HERE, "venv", "Scripts", "python.exe")
+MCP_SERVER_SCRIPT = os.path.join(_HERE, "jarvis_mcp_server.py")
+MCP_CONFIG_PATH = os.path.join(tempfile.gettempdir(), "jarvis_mcp_config.json")
+
+TIMEOUT_SECS = 720  # generous -- build_creation alone can take up to 600s
+
+PERSONA = (
+    "You are J.A.R.V.I.S, a capable voice assistant with real tools to "
+    "actually do things on the user's computer -- not just describe them. "
+    "Always prefer using a tool over saying you can't do something the tools "
+    "clearly cover. Address the user as sir occasionally, not every sentence. "
+    "Speak with calm confidence and quiet, dry wit. Your final reply is read "
+    "aloud by a text-to-speech engine: keep it under 40 words, short natural "
+    "sentences, no markdown, no bullet points, no emoji, never say your own "
+    "name. If a tool result already gave the key information, confirm it "
+    "briefly rather than repeating it verbatim."
+)
+
+
+def _ensure_mcp_config():
+    if not os.path.exists(MCP_CONFIG_PATH):
+        config = {"mcpServers": {"jarvis": {"command": VENV_PYTHON, "args": [MCP_SERVER_SCRIPT]}}}
+        with open(MCP_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f)
+    return MCP_CONFIG_PATH
+
+
+# Friendly present-tense captions for the HUD activity feed, keyed by the
+# bare tool name (without the mcp__jarvis__ prefix). Falls back to the
+# server-provided display_name, then a prettified function name.
+_CAPTION_OVERRIDES = {
+    "play_youtube": lambda a: f"Searching YouTube for {a.get('query', 'that')}",
+    "youtube_control": lambda a: "Controlling YouTube playback",
+    "build_creation": lambda a: f"Building {a.get('description', 'that')}",
+    "get_weather": lambda a: f"Checking the weather in {a.get('city', 'your area')}",
+    "ask_claude_web": lambda a: "Researching that",
+    "open_website": lambda a: f"Opening {a.get('target', 'that')}",
+    "search_web": lambda a: f"Searching for {a.get('query', 'that')}",
+    "launch_app": lambda a: f"Opening {a.get('name', 'that')}",
+    "close_app": lambda a: f"Closing {a.get('name', 'that')}",
+    "create_folder": lambda a: f"Creating a folder named {a.get('name', 'that')}",
+    "create_file": lambda a: f"Creating {a.get('name', 'that')}",
+    "delete_item": lambda a: f"Sending {a.get('name', 'that')} to the recycle bin",
+    "list_directory": lambda a: f"Checking your {a.get('location', 'files')}",
+    "read_text_file": lambda a: f"Reading {a.get('name', 'that file')}",
+    "sync_bank_data": lambda a: "Syncing your bank data",
+    "get_spending_summary": lambda a: "Pulling up your spending",
+    "describe_screen": lambda a: "Taking a look",
+    "set_reminder": lambda a: "Setting that reminder",
+    "add_note": lambda a: "Saving that note",
+    "list_notes": lambda a: "Pulling up your notes",
+    "draft_email": lambda a: "Drafting that email",
+    "check_disk_space": lambda a: "Checking disk space",
+    "clean_disk": lambda a: "Cleaning up disk space",
+    "media_control": lambda a: "Adjusting playback",
+}
+
+
+def _caption_for(name, args, meta_display_name):
+    short = name.split("__")[-1]
+    fn = _CAPTION_OVERRIDES.get(short)
+    if fn:
+        try:
+            return fn(args or {})
+        except Exception:
+            pass
+    if meta_display_name:
+        return meta_display_name
+    return short.replace("_", " ").capitalize()
+
+
+def run_agent(command, on_activity=None, on_creation=None):
+    """Run one voice command through the Claude tool-calling brain.
+
+    on_activity(text): called as soon as each tool call starts (before it
+        finishes), for live HUD feedback.
+    on_creation(payload): called with the parsed build_creation tool result
+        dict ({"ok", "kind", "title", "path"}) the moment it's available,
+        without waiting for Claude's closing remark.
+
+    Returns the final text to speak, or None if the brain couldn't be
+    reached at all (caller should fall back to local chat-only Ollama).
+    """
+    if not os.path.exists(CLAUDE_CLI):
+        return None
+
+    config_path = _ensure_mcp_config()
+    argv = [
+        CLAUDE_CLI, "-p", command,
+        "--mcp-config", config_path, "--strict-mcp-config",
+        "--tools", "",
+        "--allowedTools", "mcp__jarvis__*",
+        "--system-prompt", PERSONA,
+        "--output-format", "stream-json", "--verbose",
+        "--no-session-persistence",
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace",
+        )
+    except Exception as e:
+        print(f"  [Brain] Launch error: {e}")
+        return None
+
+    killer = threading.Timer(TIMEOUT_SECS, lambda: proc.kill())
+    killer.daemon = True
+    killer.start()
+
+    tool_calls = {}  # tool_use_id -> (name, input)
+    final_text = None
+
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type")
+
+            if etype == "assistant":
+                blocks = event.get("message", {}).get("content", []) or []
+                meta_by_id = {m.get("id"): m.get("display_name") for m in (event.get("tool_use_meta") or [])}
+                for block in blocks:
+                    if block.get("type") != "tool_use":
+                        continue
+                    tid, tname, targs = block.get("id"), block.get("name", ""), block.get("input", {}) or {}
+                    tool_calls[tid] = (tname, targs)
+                    if on_activity:
+                        try:
+                            on_activity(_caption_for(tname, targs, meta_by_id.get(tid)))
+                        except Exception:
+                            pass
+
+            elif etype == "user":
+                for block in event.get("message", {}).get("content", []) or []:
+                    if block.get("type") != "tool_result":
+                        continue
+                    tname, _targs = tool_calls.get(block.get("tool_use_id"), ("", {}))
+                    if tname.split("__")[-1] != "build_creation" or not on_creation:
+                        continue
+                    structured = ((event.get("tool_use_result") or {}).get("structuredContent")) or {}
+                    raw = structured.get("result")
+                    try:
+                        payload = json.loads(raw) if isinstance(raw, str) else raw
+                    except Exception:
+                        payload = None
+                    if payload and payload.get("ok"):
+                        try:
+                            on_creation(payload)
+                        except Exception:
+                            pass
+
+            elif etype == "result":
+                final_text = event.get("result")
+
+    finally:
+        killer.cancel()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try: proc.kill()
+            except Exception: pass
+
+    return final_text
