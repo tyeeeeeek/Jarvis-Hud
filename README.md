@@ -155,6 +155,10 @@ venv\Scripts\python.exe jarvis.py
 ├── tools.py                  # Every capability Jarvis can perform (the actual tool surface)
 ├── jarvis_mcp_server.py      # MCP stdio server exposing tools.py to the brain
 ├── browser_control.py        # Dedicated Playwright browser worker (YouTube playback)
+├── sms.py                    # Twilio SMS bridge — text Jarvis, it texts back
+├── email_watcher.py          # Gmail polling + importance triage (bills, offers, deliveries)
+├── self_improve.md           # Instructions + hard guardrails for the nightly agent
+├── run_self_improve.ps1      # Wrapper the JarvisSelfImprove scheduled task runs
 ├── plaid_service.py          # Bank-linking Flask service (finance widget)
 ├── statements_service.py     # CSV bank-statement ledger (finance widget)
 ├── requirements.txt          # Python dependencies
@@ -221,6 +225,89 @@ new, narrowly-scoped one instead.
   greetings, exit, media keys) belong in `jarvis.py`'s fast path directly.
 - **Changing the wake word**: edit `WAKE_WORD` and `_WAKE_PHRASES` in `jarvis.py`.
 - **Changing Jarvis's personality**: edit the `PERSONA` system prompt in `brain.py`.
+
+---
+
+## Text Jarvis (SMS)
+
+Text your Jarvis and it'll actually do the thing and text you back — no public
+webhook or exposing your PC to the internet required; it polls Twilio instead.
+
+1. Create a free account at [twilio.com](https://www.twilio.com) and get a Twilio phone
+   number (trial accounts get one free number and some free credit).
+2. From the [Twilio Console](https://console.twilio.com), copy your **Account SID** and
+   **Auth Token**.
+3. In `.env`, set:
+   ```
+   USER_PHONE_NUMBER=+1XXXXXXXXXX     # your real cell number
+   TWILIO_ACCOUNT_SID=...
+   TWILIO_AUTH_TOKEN=...
+   TWILIO_FROM_NUMBER=+1XXXXXXXXXX    # the Twilio number you were given
+   ```
+4. Restart Jarvis. The terminal should print `[SMS] Watching for texts from ...`.
+5. **Trial accounts**: Twilio trial numbers can only text/call numbers you've verified
+   in the console (Console → Phone Numbers → Verified Caller IDs) until you upgrade to
+   a paid account. Verify your own number there first.
+
+Texted commands go through the exact same Claude tool-calling brain as voice commands
+— same tools, same safety boundaries — and the reply comes back as a text.
+
+---
+
+## Watch my email
+
+Jarvis can watch your inbox and proactively tell you (voice + text) about anything
+that looks like a bill due, a job offer, a delivery update, or a finished-task
+notification. This is a **separate** Gmail connection from anything this chat session
+uses — Jarvis needs to keep watching even when no Claude Code session is open.
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/), create a
+   project (or use an existing one).
+2. Enable the **Gmail API** for it (APIs & Services → Enable APIs → search "Gmail
+   API").
+3. Configure the OAuth consent screen (APIs & Services → OAuth consent screen) —
+   choose "External," fill in the required fields, and add your own Google account as
+   a test user. (This stays in testing mode indefinitely for personal use — no Google
+   review needed.)
+4. Create credentials (APIs & Services → Credentials → Create Credentials → OAuth
+   client ID → Desktop app).
+5. Download the resulting JSON and save it as `credentials.json` directly in this
+   project folder.
+6. Restart Jarvis. The first time, a browser window will open asking you to sign in
+   and approve access — after that it's cached in `token.json` and never asks again.
+
+Classification runs on your local Ollama model (not Claude) since it polls every
+couple of minutes — cheap and private, no per-check API cost.
+
+---
+
+## 24/7 self-improvement
+
+A Windows Scheduled Task (`JarvisSelfImprove`, nightly at 3 AM) runs Claude Code
+autonomously against this project folder to find and fix bugs, tidy things up, and add
+small useful capabilities — with full local file/command access and **no approval
+step**, per your call on how much autonomy to give it.
+
+What keeps this from being reckless:
+- **Hard-coded guardrails it cannot override** (see `self_improve.md`): it can never
+  add a shell-exec tool to the brain's toolset, widen the filesystem safe-dirs list to
+  an arbitrary path, make deletes bypass the Recycle Bin, let app-closing target
+  anything outside the curated list, make email auto-send, or weaken the creator-mode
+  iframe sandboxing.
+- **A verification gate before every commit** — it must run `npm run build` /
+  Python syntax checks on anything it changes, and revert rather than commit if
+  something doesn't pass.
+- **Git.** Every change lands as its own commit with a clear message. Nothing it does
+  is ever unrecoverable — `git log` shows every change, `git revert <hash>` undoes any
+  of them.
+
+**To check on it**: run logs land in `~/.jarvis/self_improve_logs/`; git history
+(`git log --oneline`) shows exactly what it's changed over time.
+**To run it manually** (instead of waiting for 3 AM): `schtasks /Run /TN "JarvisSelfImprove"`.
+**To change the schedule**: `schtasks /Change /TN "JarvisSelfImprove" /ST 02:00` (or any
+time — note it only fires if the PC is on at that time).
+**To turn it off**: `schtasks /Delete /TN "JarvisSelfImprove" /F` (or `/Disable` instead
+of `/Delete` to keep it around but paused).
 
 ---
 
