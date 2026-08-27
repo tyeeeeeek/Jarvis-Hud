@@ -239,6 +239,11 @@ def speak(text):
         return True
     interrupt_flag.clear()
     print(f"\n  [Jarvis]  {text}\n")
+    if not _speaking_enabled.is_set():
+        # Voice output is off (stop speaking / text mode only) -- still log
+        # the reply, just skip TTS. Text-channel delivery (Telegram/SMS)
+        # happens separately via handle_command's notify(), unaffected.
+        return True
     _ws_broadcast({"type": "speaking", "value": True, "text": text})
     completed = True
     tts_text = _prep_tts_text(text)
@@ -283,6 +288,19 @@ def speak(text):
 audio_queue, text_queue = queue.Queue(), queue.Queue()
 interrupt_flag, pipeline_stop = threading.Event(), threading.Event()
 _last_wake_ts = 0.0
+
+# Voice input/output toggles -- set via the "stop/start listening",
+# "stop/start speaking", and "text mode only" commands (any channel: voice,
+# typed, SMS, Telegram). Both default on. When listening is off, the
+# recognition thread still drains the mic's audio queue (so the input
+# stream itself never blocks/leaks) but never runs it through Vosk, so no
+# speech is ever transcribed while "asleep". When speaking is off, speak()
+# still prints/logs the reply but skips TTS playback entirely -- replies
+# keep flowing over whichever text channel (Telegram/SMS/HUD) triggered
+# them, so "text mode only" (both off) is a full switch to text-only.
+_listening_enabled, _speaking_enabled = threading.Event(), threading.Event()
+_listening_enabled.set()
+_speaking_enabled.set()
 
 # Voice, typed, and SMS commands all end up calling handle_command(), which
 # touches shared TTS/interrupt state (speak(), interrupt_flag). This keeps
@@ -443,6 +461,12 @@ def recognition_thread():
         try:
             data = audio_queue.get(timeout=0.5)
         except queue.Empty:
+            continue
+
+        if not _listening_enabled.is_set():
+            # "stop listening" / "text mode only" -- drain the mic queue so
+            # the input stream never backs up, but never run it through
+            # Vosk, so nothing said while off is ever transcribed.
             continue
 
         if rec.AcceptWaveform(data):
@@ -764,6 +788,28 @@ def handle_command(command, acked=False, notify=None):
             _reply("Goodbye sir.")
             return "exit"
 
+        if cmd == "stop listening":
+            _listening_enabled.clear()
+            return _reply("Voice input off sir. I'll only respond over text from here.")
+
+        if cmd == "start listening":
+            _listening_enabled.set()
+            return _reply("Voice input back on sir.")
+
+        if cmd == "stop speaking":
+            _speaking_enabled.clear()
+            return _reply("Going quiet sir. I'll reply over text from here.")
+
+        if cmd == "start speaking":
+            _speaking_enabled.set()
+            return _reply("Voice output back on sir.")
+
+        if cmd == "text mode only":
+            _listening_enabled.clear()
+            _speaking_enabled.clear()
+            return _reply("Switching to text-only mode sir. Text me \"start listening\" "
+                           "or \"start speaking\" whenever you'd like voice back.")
+
         if cmd in _MEDIA_FAST_PHRASES:
             return _reply(tools.media_control(_MEDIA_FAST_PHRASES[cmd]))
 
@@ -832,6 +878,12 @@ def voice_loop():
 
     while not pipeline_stop.is_set():
         try:
+            if not _listening_enabled.is_set():
+                set_status("Text-only mode")
+                if pipeline_stop.wait(1):
+                    break
+                continue
+
             set_status("Idle")
             print("  Waiting for 'Jarvis'...")
             detected, inline_cmd = wait_for_wake_word(timeout=10)
