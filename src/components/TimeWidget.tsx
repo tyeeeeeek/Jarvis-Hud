@@ -20,7 +20,7 @@ export function TimeWidget() {
       </div>
       <div className="w-clock-row">
         <span className="w-clock">
-          {now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: TIME_ZONE })}
+          {now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZone: TIME_ZONE })}
         </span>
       </div>
       <div className="w-weekday">
