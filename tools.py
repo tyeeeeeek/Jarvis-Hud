@@ -229,23 +229,26 @@ _APP_IMAGE_NAMES_WIN = {
     "snippingtool": "SnippingTool.exe",
 }
 
-# Linux: alias -> the actual binary name to launch/pkill. This is a
-# best-effort default set (common on GNOME-based Ubuntu) -- verify/adjust
-# against what's actually installed on the target machine.
+# Linux: alias -> the actual binary name to launch/pkill. Verified against
+# what's actually installed on this machine (GNOME 46 / Ubuntu 26.04):
+# ptyxis is the default terminal here (gnome-terminal isn't installed), and
+# gedit was renamed gnome-text-editor upstream. spotify/vs code/discord/
+# steam/slack/zoom aren't installed on this machine but are left as curated
+# placeholders in case they're added later -- launch_app already reports
+# "doesn't appear to be installed" cleanly if the binary isn't found.
 _APP_ALIASES_LINUX = {
-    "terminal": "gnome-terminal", "command prompt": "gnome-terminal",
+    "terminal": "ptyxis", "command prompt": "ptyxis",
     "file explorer": "nautilus", "files": "nautilus", "explorer": "nautilus",
-    "text editor": "gedit", "calculator": "gnome-calculator", "calc": "gnome-calculator",
+    "text editor": "gnome-text-editor", "gedit": "gnome-text-editor",
+    "calculator": "gnome-calculator", "calc": "gnome-calculator",
     "settings": "gnome-control-center", "spotify": "spotify",
     "vs code": "code", "visual studio code": "code",
-    "chrome": "google-chrome", "firefox": "firefox", "discord": "discord",
-    "steam": "steam", "slack": "slack", "zoom": "zoom",
+    "chrome": "google-chrome", "firefox": "firefox", "brave": "brave",
+    "discord": "discord", "steam": "steam", "slack": "slack", "zoom": "zoom",
 }
-# Same binary name works for both launch and pkill on Linux, so no separate
-# image-name map is needed there.
 
 _APP_ALIASES = _APP_ALIASES_WIN if IS_WINDOWS else _APP_ALIASES_LINUX
-_APP_IMAGE_NAMES = _APP_IMAGE_NAMES_WIN if IS_WINDOWS else _APP_ALIASES_LINUX
+_APP_IMAGE_NAMES = _APP_IMAGE_NAMES_WIN if IS_WINDOWS else None
 
 
 def launch_app(name: str) -> str:
@@ -271,14 +274,26 @@ def close_app(name: str) -> str:
     forced kill). Restricted to the same curated app list as launch_app."""
     key = re.sub(r'^(the|a|an)\s+', '', (name or "").strip().lower())
     exe = _APP_ALIASES.get(key)
-    image = _APP_IMAGE_NAMES.get(exe) if exe else None
+    # On Linux the binary name doubles as the pkill target; on Windows the
+    # process image name is a separate lookup.
+    image = (_APP_IMAGE_NAMES.get(exe) if exe else None) if IS_WINDOWS else exe
     if not image:
         return f"I won't close {name} sir -- it's not in my curated list of apps I'm allowed to close."
     try:
         if IS_WINDOWS:
             subprocess.run(["taskkill", "/IM", image], capture_output=True, timeout=10)
         else:
-            subprocess.run(["pkill", "-x", image], capture_output=True, timeout=10)
+            # taskkill /IM matches by image name regardless of path or args;
+            # replicate that on Linux instead of a bare `pkill -x image`,
+            # which (a) matches against the kernel's 15-char-truncated comm
+            # field, so multi-word names like gnome-calculator never match,
+            # and (b) requires zero args, which breaks GNOME apps that are
+            # already running and get re-invoked with a subcommand (e.g.
+            # `gnome-control-center bluetooth` for an already-open Settings
+            # window). Match the full cmdline against an optional path
+            # prefix + the image name + optional trailing args instead.
+            pattern = rf"(.*/)?{re.escape(image)}( .*)?"
+            subprocess.run(["pkill", "-f", "-x", pattern], capture_output=True, timeout=10)
         return f"Closing {name} sir."
     except Exception as e:
         return f"I couldn't close {name} sir: {e}"
