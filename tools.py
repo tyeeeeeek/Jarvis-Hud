@@ -14,9 +14,11 @@
 #   new narrow function here -- never widen one of these into a
 #   general-purpose executor.
 # ================================================================
-import os, re, json, time, shutil, tempfile, threading, subprocess, urllib.parse, webbrowser
+import os, re, sys, json, time, shutil, tempfile, threading, subprocess, urllib.parse, webbrowser
 
 import requests
+
+IS_WINDOWS = sys.platform == "win32"
 
 try:
     import win32api; WIN32_AVAILABLE = True
@@ -45,7 +47,8 @@ except ImportError:
 
 
 HOME = os.path.expanduser("~")
-CLAUDE_CLI = os.path.join(HOME, ".local", "bin", "claude.exe")
+CLAUDE_CLI = shutil.which("claude") or os.path.join(
+    HOME, ".local", "bin", "claude.exe" if IS_WINDOWS else "claude")
 OLLAMA_URL = "http://localhost:11434/api/generate"
 VISION_MODEL = "llava"
 
@@ -203,7 +206,8 @@ def delete_item(name: str, location: str = "desktop") -> str:
 
 
 # ================================================================ APPS
-_APP_ALIASES = {
+# Windows: alias -> the name os.startfile()/taskkill expects.
+_APP_ALIASES_WIN = {
     "notepad": "notepad", "calculator": "calc", "calc": "calc",
     "file explorer": "explorer", "explorer": "explorer",
     "task manager": "taskmgr", "paint": "mspaint",
@@ -215,8 +219,7 @@ _APP_ALIASES = {
     "slack": "slack", "zoom": "zoom", "photos": "ms-photos:",
     "snipping tool": "snippingtool", "camera": "microsoft.windows.camera:",
 }
-# image names used by taskkill, for apps whose process name differs from the alias
-_APP_IMAGE_NAMES = {
+_APP_IMAGE_NAMES_WIN = {
     "notepad": "notepad.exe", "calc": "CalculatorApp.exe", "explorer": None,  # never kill explorer
     "taskmgr": "Taskmgr.exe", "mspaint": "mspaint.exe", "spotify": "Spotify.exe",
     "code": "Code.exe", "winword": "WINWORD.EXE", "excel": "EXCEL.EXE",
@@ -225,6 +228,24 @@ _APP_IMAGE_NAMES = {
     "steam": "steam.exe", "slack": "slack.exe", "zoom": "Zoom.exe",
     "snippingtool": "SnippingTool.exe",
 }
+
+# Linux: alias -> the actual binary name to launch/pkill. This is a
+# best-effort default set (common on GNOME-based Ubuntu) -- verify/adjust
+# against what's actually installed on the target machine.
+_APP_ALIASES_LINUX = {
+    "terminal": "gnome-terminal", "command prompt": "gnome-terminal",
+    "file explorer": "nautilus", "files": "nautilus", "explorer": "nautilus",
+    "text editor": "gedit", "calculator": "gnome-calculator", "calc": "gnome-calculator",
+    "settings": "gnome-control-center", "spotify": "spotify",
+    "vs code": "code", "visual studio code": "code",
+    "chrome": "google-chrome", "firefox": "firefox", "discord": "discord",
+    "steam": "steam", "slack": "slack", "zoom": "zoom",
+}
+# Same binary name works for both launch and pkill on Linux, so no separate
+# image-name map is needed there.
+
+_APP_ALIASES = _APP_ALIASES_WIN if IS_WINDOWS else _APP_ALIASES_LINUX
+_APP_IMAGE_NAMES = _APP_IMAGE_NAMES_WIN if IS_WINDOWS else _APP_ALIASES_LINUX
 
 
 def launch_app(name: str) -> str:
@@ -235,7 +256,11 @@ def launch_app(name: str) -> str:
     if not exe:
         return f"I don't have {name} in my known app list sir. Try opening it by hand once and I'll remember it next time you ask me to add it."
     try:
-        os.startfile(exe)
+        if IS_WINDOWS:
+            os.startfile(exe)
+        else:
+            subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              start_new_session=True)
         return f"Opening {name} sir."
     except Exception:
         return f"{name} doesn't appear to be installed sir."
@@ -250,7 +275,10 @@ def close_app(name: str) -> str:
     if not image:
         return f"I won't close {name} sir -- it's not in my curated list of apps I'm allowed to close."
     try:
-        subprocess.run(["taskkill", "/IM", image], capture_output=True, timeout=10)
+        if IS_WINDOWS:
+            subprocess.run(["taskkill", "/IM", image], capture_output=True, timeout=10)
+        else:
+            subprocess.run(["pkill", "-x", image], capture_output=True, timeout=10)
         return f"Closing {name} sir."
     except Exception as e:
         return f"I couldn't close {name} sir: {e}"
@@ -426,12 +454,16 @@ def _human_size(n):
     return f"{n:.1f} TB"
 
 
+_DISK_ROOT = "C:\\" if IS_WINDOWS else "/"
+
+
 def check_disk_space() -> str:
-    """Report free vs total disk space on the C: drive, and how much
+    """Report free vs total disk space on the main drive, and how much
     reclaimable space is sitting in the temp folder."""
-    total, _used, free = shutil.disk_usage("C:\\")
+    total, _used, free = shutil.disk_usage(_DISK_ROOT)
     temp_size = _dir_size(tempfile.gettempdir())
-    return (f"You have {_human_size(free)} free out of {_human_size(total)} on drive C sir. "
+    label = "drive C" if IS_WINDOWS else "the main drive"
+    return (f"You have {_human_size(free)} free out of {_human_size(total)} on {label} sir. "
             f"Your temp folder alone is holding {_human_size(temp_size)} of reclaimable space.")
 
 
@@ -450,16 +482,22 @@ def _clear_temp_folder(path):
 def clean_disk() -> str:
     """Clear the OS temp folder and empty the Recycle Bin. Never touches user
     files or documents."""
-    _, _, free_before = shutil.disk_usage("C:\\")
+    _, _, free_before = shutil.disk_usage(_DISK_ROOT)
     _clear_temp_folder(tempfile.gettempdir())
     try:
-        subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"],
-            timeout=30, capture_output=True,
-        )
+        if IS_WINDOWS:
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"],
+                timeout=30, capture_output=True,
+            )
+        elif shutil.which("gio"):
+            subprocess.run(["gio", "trash", "--empty"], timeout=30, capture_output=True)
+        else:
+            for sub in ("files", "info"):
+                _clear_temp_folder(os.path.join(HOME, ".local", "share", "Trash", sub))
     except Exception:
         pass
-    _, _, free_after = shutil.disk_usage("C:\\")
+    _, _, free_after = shutil.disk_usage(_DISK_ROOT)
     freed = max(0, free_after - free_before)
     return f"Done sir. Cleared temporary files and the recycle bin, freeing up {_human_size(freed)}."
 

@@ -37,12 +37,15 @@ function findIndexHtml() {
 }
 
 function startPython() {
-  // Adjust these two paths if your Python setup differs.
-  // pythonw.exe (Windows) hides the console window; use "python" on
-  // Mac/Linux, or just "python" on Windows if you don't mind a console.
+  // Prefer the project's own venv interpreter over a bare system one so
+  // jarvis.py actually has its pip-installed dependencies available.
   const isWin = process.platform === "win32";
   const venvPythonw = path.join(__dirname, "venv", "Scripts", "pythonw.exe");
-  const pythonCmd = isWin && fs.existsSync(venvPythonw) ? venvPythonw : (isWin ? "pythonw" : "python3");
+  const venvPython = path.join(__dirname, "venv", "bin", "python");
+  let pythonCmd;
+  if (isWin && fs.existsSync(venvPythonw)) pythonCmd = venvPythonw;
+  else if (!isWin && fs.existsSync(venvPython)) pythonCmd = venvPython;
+  else pythonCmd = isWin ? "pythonw" : "python3";
   const scriptPath = path.join(__dirname, "jarvis.py");
 
   if (!fs.existsSync(scriptPath)) {

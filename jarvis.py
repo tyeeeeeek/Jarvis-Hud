@@ -26,13 +26,19 @@ if sys.stderr is None:
     sys.stderr = io.StringIO()
 
 import os, re, json, time, queue, random, asyncio, webbrowser, socket
-import tempfile, threading, zipfile, urllib.request
+import tempfile, threading, zipfile, urllib.request, shutil, subprocess
 
 from dotenv import load_dotenv
 load_dotenv()  # loads .env into os.environ -- must happen before sms.py/email_watcher.py
                 # read their TWILIO_*/GMAIL_*/USER_PHONE_NUMBER config at import time
 
-import pyaudio, requests, win32com.client
+import sys as _sys
+import pyaudio, requests
+
+IS_WINDOWS = _sys.platform == "win32"
+
+if IS_WINDOWS:
+    import win32com.client
 
 try:
     import edge_tts; EDGE_TTS_AVAILABLE = True
@@ -148,6 +154,9 @@ def ensure_vosk_model():
 
 
 # ================================================================ TTS
+# Primary voice is always edge-tts (below) -- these are just the last-resort,
+# no-internet fallback, and differ by OS: Windows uses the built-in SAPI
+# voice, Linux uses espeak/espeak-ng if installed.
 _sapi_speaker = None
 
 
@@ -167,6 +176,29 @@ def _speak_sapi_fallback(text):
             _sapi_speaker.Speak("", SAPI_ASYNC | SAPI_PURGE)
             return False
     return True
+
+
+def _speak_linux_fallback(text):
+    exe = shutil.which("espeak-ng") or shutil.which("espeak")
+    if not exe:
+        print(f"  [TTS skipped] {text}")
+        return True
+    interrupt_flag.clear()
+    chunks = [c.strip() for c in re.split(r'(?<=[.!?])\s+', text) if c.strip()]
+    for chunk in chunks:
+        if interrupt_flag.is_set():
+            return False
+        proc = subprocess.Popen([exe, chunk], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while proc.poll() is None:
+            if interrupt_flag.is_set():
+                proc.terminate()
+                return False
+            time.sleep(0.05)
+    return True
+
+
+def _speak_local_fallback(text):
+    return _speak_sapi_fallback(text) if IS_WINDOWS else _speak_linux_fallback(text)
 
 
 async def _edge_tts_save(text, path):
@@ -210,9 +242,9 @@ def speak(text):
             except: pass
         except Exception as e:
             print(f"  [EdgeTTS error] {e}")
-            completed = _speak_sapi_fallback(tts_text)
+            completed = _speak_local_fallback(tts_text)
     else:
-        completed = _speak_sapi_fallback(tts_text)
+        completed = _speak_local_fallback(tts_text)
 
     _ws_broadcast({"type": "speaking", "value": False})
     return completed
@@ -650,7 +682,7 @@ def voice_loop():
             print("  [Audio] pygame mixer ready")
         except Exception as e:
             print(f"  [Audio Error] {e}")
-    else:
+    elif IS_WINDOWS:
         try:
             import pythoncom
             pythoncom.CoInitialize()

@@ -19,12 +19,15 @@
 #   live: Bash is completely unavailable to this call, and only the
 #   jarvis__* tools exist.
 # ================================================================
-import os, json, tempfile, subprocess, threading
+import os, sys, json, shutil, tempfile, subprocess, threading
 
 HOME = os.path.expanduser("~")
-CLAUDE_CLI = os.path.join(HOME, ".local", "bin", "claude.exe")
+CLAUDE_CLI = shutil.which("claude") or os.path.join(
+    HOME, ".local", "bin", "claude.exe" if sys.platform == "win32" else "claude")
 _HERE = os.path.dirname(os.path.abspath(__file__))
-VENV_PYTHON = os.path.join(_HERE, "venv", "Scripts", "python.exe")
+VENV_PYTHON = os.path.join(
+    _HERE, "venv", "Scripts" if sys.platform == "win32" else "bin",
+    "python.exe" if sys.platform == "win32" else "python")
 MCP_SERVER_SCRIPT = os.path.join(_HERE, "jarvis_mcp_server.py")
 MCP_CONFIG_PATH = os.path.join(tempfile.gettempdir(), "jarvis_mcp_config.json")
 
