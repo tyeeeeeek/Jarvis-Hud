@@ -539,6 +539,12 @@ _TEMP_ZONE_PRIORITY = ("x86_pkg_temp", "cpu_thermal", "k10temp", "acpitz", "pch_
 _TEMP_WARN_C = 85.0
 _TEMP_CRITICAL_C = 95.0
 _DISK_LOW_FREE_GB = 10.0
+_DISK_CRITICAL_FREE_GB = 3.0
+
+# Structured result of the most recent check_system_health() call -- lets
+# callers (e.g. jarvis.py's health-watcher thread) branch on whether it was
+# critical without re-parsing the human-readable reply string.
+LAST_HEALTH_RESULT = {}
 
 
 def _read_linux_temps():
@@ -632,16 +638,33 @@ def check_system_health() -> str:
     free_gb = free / (1024 ** 3)
     cleaned = free_gb < _DISK_LOW_FREE_GB
     freed_bytes = _do_clean_disk() if cleaned else 0
+    if cleaned:
+        # Re-measure after cleanup -- if it's still critically low, temp
+        # files/recycle bin weren't the problem and the user needs to know.
+        _total, _used, free = shutil.disk_usage(_DISK_ROOT)
+        free_gb = free / (1024 ** 3)
+    disk_critical = free_gb < _DISK_CRITICAL_FREE_GB
     disk_note = (
+        f"Disk space is critically low ({free_gb:.1f} GB free) even after clearing temp files "
+        f"and the recycle bin sir -- you'll need to free up space manually." if disk_critical else
         f"Disk space was low ({free_gb:.1f} GB free) so I cleared temp files and the recycle "
         f"bin, freeing {_human_size(freed_bytes)} sir." if cleaned else
         f"Disk space is fine sir, {free_gb:.1f} GB free."
     )
 
+    critical = thermal_state == "critical" or disk_critical
+
     _log_health_event({
         "thermal_state": thermal_state, "hottest_zone": zone, "hottest_c": hottest,
         "free_gb": round(free_gb, 1), "cleaned": cleaned, "freed_bytes": freed_bytes,
+        "disk_critical": disk_critical, "critical": critical,
     })
+
+    global LAST_HEALTH_RESULT
+    LAST_HEALTH_RESULT = {
+        "thermal_state": thermal_state, "disk_critical": disk_critical, "critical": critical,
+        "free_gb": round(free_gb, 1), "hottest_c": hottest,
+    }
 
     return f"{thermal_note} {disk_note}"
 

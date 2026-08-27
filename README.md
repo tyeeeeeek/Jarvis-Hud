@@ -157,6 +157,7 @@ venv\Scripts\python.exe jarvis.py
 ├── browser_control.py        # Dedicated Playwright browser worker (YouTube playback)
 ├── sms.py                    # Twilio SMS bridge — text Jarvis, it texts back
 ├── telegram_bridge.py        # Free Telegram bridge — same idea, no Twilio needed
+├── jarvis_cpu_alerts.py      # JarvisCPU_Alerts — dedicated send-only bot for PC health alerts
 ├── email_watcher.py          # Gmail polling + importance triage (bills, offers, deliveries)
 ├── self_improve.md           # Instructions + hard guardrails for the nightly agent
 ├── run_self_improve.ps1      # Wrapper the JarvisSelfImprove scheduled task runs
@@ -277,6 +278,39 @@ inside the Telegram app instead of getting native texts.
 
 Jarvis only ever acts on messages from that one chat ID — a leaked bot token or a
 guessed username can't hand anyone else command access.
+
+---
+
+## PC health alerts (JarvisCPU_Alerts)
+
+A second, dedicated Telegram bot just for PC health status — separate from the
+command bot above so alerts never get mixed in with a two-way command chat. It
+rides along on the existing 2-hour `check_system_health()` background check
+(see `_health_watcher_thread` in `jarvis.py`):
+
+- After **every** scheduled check, it sends a short summary (temperature +
+  disk space) to Telegram.
+- If a check finds a **critical** issue — overheating risk or disk space
+  that's still critically low even after Jarvis auto-clears temp files/the
+  recycle bin — it sends an alert **immediately**, rather than waiting for
+  the next summary.
+
+It's send-only: it never polls for incoming messages and can't be used to run
+commands, so a leaked token can only be used to spam that one chat.
+
+1. Message **@BotFather** in Telegram, send `/newbot`, and follow the prompts
+   to get a new bot token (a *different* bot than the one used for texting
+   Jarvis above, so alerts stay on their own channel).
+2. Send that new bot anything so it knows who you are.
+3. In `.env`, set:
+   ```
+   JARVIS_CPU_ALERTS_BOT_TOKEN=123456:XYZ-...   # from BotFather
+   JARVIS_CPU_ALERTS_CHAT_ID=                   # leave blank to reuse TELEGRAM_CHAT_ID
+   ```
+4. Restart Jarvis. No separate thread or startup log line needed — it's called
+   directly from the existing health-check loop.
+
+Fully inert (no-op, no errors) until `JARVIS_CPU_ALERTS_BOT_TOKEN` is set.
 
 ---
 

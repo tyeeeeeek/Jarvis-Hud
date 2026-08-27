@@ -64,6 +64,7 @@ import tools
 import brain
 import sms
 import telegram_bridge
+import jarvis_cpu_alerts
 import email_watcher
 
 try:
@@ -603,7 +604,12 @@ def _health_watcher_thread():
     """Runs check_system_health() immediately, then every 2 hours for as
     long as Jarvis's backend is running -- overheating risk and low-disk
     cleanup, logged to ~/.jarvis/health_log.jsonl every time. Only speaks up
-    if something's actually critical, so it stays quiet in the normal case."""
+    if something's actually critical, so it stays quiet in the normal case.
+
+    The JarvisCPU_Alerts sub-agent (jarvis_cpu_alerts.py) rides along on the
+    same cycle: it gets a summary after every check, and a critical issue
+    (overheating risk or critically low disk space) triggers an immediate
+    Telegram alert from it, same as the voice/SMS/main-Telegram alert below."""
     while not pipeline_stop.is_set():
         try:
             result = tools.check_system_health()
@@ -611,11 +617,15 @@ def _health_watcher_thread():
         except Exception as e:
             print(f"  [Health] {e}")
             result = ""
-        if "overheating risk" in result:
+        critical = tools.LAST_HEALTH_RESULT.get("critical", False)
+        if critical:
             text = f"Health check sir: {result}"
             with _command_lock:
                 speak(text)
             _notify_all(text)
+            jarvis_cpu_alerts.send_critical_alert(result)
+        if result:
+            jarvis_cpu_alerts.send_summary(result)
         if pipeline_stop.wait(_HEALTH_CHECK_INTERVAL_SECONDS):
             break
 
