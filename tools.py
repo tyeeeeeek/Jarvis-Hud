@@ -884,6 +884,14 @@ _DIAGNOSTIC_COMMANDS_WIN = {
     "whoami": (["whoami"], False),
     "listening_ports": (["netstat", "-an"], False),
     "ping": (["ping", "-n", "4"], True),
+    "system_info": (["powershell", "-NoProfile", "-Command",
+                      "Get-ComputerInfo | Select-Object WindowsProductName,OsVersion,"
+                      "CsName,OsHardwareAbstractionLayer | Format-List"], False),
+    "disk_layout": (["powershell", "-NoProfile", "-Command",
+                      "Get-Disk | Format-Table -AutoSize"], False),
+    "dns_lookup": (["powershell", "-NoProfile", "-Command", "Resolve-DnsName"], True),
+    "public_ip": (["powershell", "-NoProfile", "-Command",
+                    "(Invoke-RestMethod -Uri https://ifconfig.me)"], False),
 }
 _DIAGNOSTIC_COMMANDS_LINUX = {
     "disk_usage": (["df", "-h"], False),
@@ -894,6 +902,13 @@ _DIAGNOSTIC_COMMANDS_LINUX = {
     "whoami": (["whoami"], False),
     "listening_ports": (["ss", "-tulpn"], False),
     "ping": (["ping", "-c", "4"], True),
+    "system_info": (["hostnamectl"], False),
+    # -e7 excludes loop devices (major number 7) -- on a machine with a lot
+    # of snaps installed, those otherwise bury the real physical disks/
+    # partitions under dozens of irrelevant loop-mounted squashfs entries.
+    "disk_layout": (["lsblk", "-e7"], False),
+    "dns_lookup": (["dig", "+short"], True),
+    "public_ip": (["curl", "-s", "-4", "--max-time", "6", "https://ifconfig.me"], False),
 }
 _DIAGNOSTIC_COMMANDS = _DIAGNOSTIC_COMMANDS_WIN if IS_WINDOWS else _DIAGNOSTIC_COMMANDS_LINUX
 _HOSTNAME_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9\-.]{0,252})$')
@@ -905,8 +920,9 @@ def run_diagnostic_command(command: str, target: str = "") -> str:
     named list rather than free-text (never a generic shell-exec -- see this
     file's module docstring). command must be one of: disk_usage,
     memory_usage, processes, network_info, uptime, whoami, listening_ports,
-    ping. `target` is only used by ping and must be a plain hostname or IP
-    (e.g. "google.com", "8.8.8.8") -- nothing else is accepted."""
+    ping, system_info, disk_layout, dns_lookup, public_ip. `target` is only
+    used by ping and dns_lookup and must be a plain hostname or IP (e.g.
+    "google.com", "8.8.8.8") -- nothing else is accepted."""
     key = (command or "").strip().lower()
     entry = _DIAGNOSTIC_COMMANDS.get(key)
     if not entry:
@@ -917,7 +933,7 @@ def run_diagnostic_command(command: str, target: str = "") -> str:
     if needs_target:
         target = (target or "").strip()
         if not target or not _HOSTNAME_RE.match(target):
-            return "I need a plain hostname or IP address to ping sir -- letters, numbers, dots, and dashes only."
+            return "I need a plain hostname or IP address sir -- letters, numbers, dots, and dashes only."
         cmd.append(target)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
