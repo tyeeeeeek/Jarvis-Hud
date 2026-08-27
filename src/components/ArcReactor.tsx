@@ -4,6 +4,7 @@ import { DraggableWidget } from "./DraggableWidget";
 import { WeatherWidget } from "./WeatherWidget";
 import { TimeWidget } from "./TimeWidget";
 import { FinanceWidget } from "./FinanceWidget";
+import { HomelabWidget } from "./HomelabWidget";
 import { JarvisConsole, type LogEntry } from "./JarvisConsole";
 import { CreationPanel, type Creation } from "./CreationPanel";
 import { ContextMenu } from "./ContextMenu";
@@ -13,7 +14,7 @@ const MAX_LOG_ENTRIES = 8;
 
 const VIS_KEY = "jarvis-widget-visibility";
 
-type WidgetId = "weather" | "time" | "jarvisConsole" | "finance";
+type WidgetId = "weather" | "time" | "jarvisConsole" | "finance" | "homelab";
 type VisibilityMap = Record<WidgetId, boolean>;
 
 const DEFAULT_VISIBILITY: VisibilityMap = {
@@ -21,6 +22,7 @@ const DEFAULT_VISIBILITY: VisibilityMap = {
   time: true,
   jarvisConsole: true,
   finance: true,
+  homelab: true,
 };
 
 function loadVisibility(): VisibilityMap {
@@ -39,6 +41,7 @@ const WIDGET_LABELS: Record<WidgetId, string> = {
   time: "Time",
   jarvisConsole: "Jarvis Console",
   finance: "Finance",
+  homelab: "Homelab",
 };
 
 type CtxState =
@@ -54,6 +57,7 @@ function defaultPositions() {
     time: { x: W * 0.72, y: H * 0.10 },
     jarvisConsole: { x: W * 0.72, y: H * 0.55 },
     finance: { x: W * 0.05, y: H * 0.55 },
+    homelab: { x: W * 0.38, y: H * 0.80 },
   };
 }
 
@@ -78,7 +82,7 @@ export default function ArcReactor() {
   const [creations, setCreations] = useState<Creation[]>([]);
   const [wakeFlash, setWakeFlash] = useState(false);
   const [barVisible, setBarVisible] = useState(false);
-  const [widgetStack, setWidgetStack] = useState<WidgetId[]>(["weather", "time", "jarvisConsole", "finance"]);
+  const [widgetStack, setWidgetStack] = useState<WidgetId[]>(["weather", "time", "jarvisConsole", "finance", "homelab"]);
 
   const logIdRef = useRef(0);
   const creationIdRef = useRef(0);
@@ -317,6 +321,13 @@ export default function ArcReactor() {
           onRightClick={openWidgetMenu}
           zIndex={getZ("finance")} onFocus={() => bringToFront("finance")}>
           <FinanceWidget />
+        </DraggableWidget>
+
+        <DraggableWidget id="homelab" visible={visibility.homelab}
+          initialX={pos.homelab.x} initialY={pos.homelab.y}
+          onRightClick={openWidgetMenu}
+          zIndex={getZ("homelab")} onFocus={() => bringToFront("homelab")}>
+          <HomelabWidget />
         </DraggableWidget>
 
         <DraggableWidget id="jarvisConsole" visible={visibility.jarvisConsole}
