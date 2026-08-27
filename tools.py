@@ -1278,6 +1278,46 @@ def set_reminder(text: str, minutes: float) -> str:
     return f"I'll remind you in {minutes:g} minutes sir."
 
 
+def list_reminders() -> str:
+    """List every reminder that hasn't fired yet, soonest first, with how
+    much time is left on each."""
+    reminders = _load_json(REMINDERS_PATH, [])
+    if not reminders:
+        return "You don't have any reminders set sir."
+    now = time.time()
+    lines = []
+    for r in sorted(reminders, key=lambda r: r["due"]):
+        remaining_min = max(0.0, (r["due"] - now) / 60)
+        if remaining_min < 1:
+            when = "due any moment"
+        elif remaining_min < 60:
+            when = f"in {remaining_min:.0f} min"
+        else:
+            when = f"in {remaining_min / 60:.1f} hr"
+        lines.append(f"{r['text']} ({when})")
+    return "Your reminders sir: " + "; ".join(lines)
+
+
+def cancel_reminder(text: str) -> str:
+    """Cancel a pending reminder that hasn't fired yet. Matches by a
+    substring of the reminder's text -- doesn't need to be exact. If more
+    than one reminder matches, none are cancelled and the matches are
+    listed so the user can be more specific."""
+    if not text or not text.strip():
+        return "Which reminder sir?"
+    reminders = _load_json(REMINDERS_PATH, [])
+    needle = text.strip().lower()
+    matches = [r for r in reminders if needle in r["text"].lower()]
+    if not matches:
+        return f"I couldn't find a reminder matching \"{text}\" sir."
+    if len(matches) > 1:
+        listed = "; ".join(r["text"] for r in matches)
+        return f"That matches more than one reminder sir: {listed}. Be more specific."
+    remaining = [r for r in reminders if r is not matches[0]]
+    _save_json(REMINDERS_PATH, remaining)
+    return f"Cancelled the reminder: {matches[0]['text']} sir."
+
+
 def add_note(text: str) -> str:
     """Save a short note for later, retrievable with list_notes."""
     if not text:
@@ -1295,6 +1335,25 @@ def list_notes() -> str:
         return "You don't have any notes saved sir."
     lines = [n["text"] for n in notes[-10:]]
     return "Your notes: " + "; ".join(lines)
+
+
+def delete_note(text: str) -> str:
+    """Delete a saved note. Matches by a substring of the note's text --
+    doesn't need to be exact. If more than one note matches, none are
+    deleted and the matches are listed so the user can be more specific."""
+    if not text or not text.strip():
+        return "Which note sir?"
+    notes = _load_json(NOTES_PATH, [])
+    needle = text.strip().lower()
+    matches = [n for n in notes if needle in n["text"].lower()]
+    if not matches:
+        return f"I couldn't find a note matching \"{text}\" sir."
+    if len(matches) > 1:
+        listed = "; ".join(n["text"] for n in matches)
+        return f"That matches more than one note sir: {listed}. Be more specific."
+    remaining = [n for n in notes if n is not matches[0]]
+    _save_json(NOTES_PATH, remaining)
+    return f"Deleted the note: {matches[0]['text']} sir."
 
 
 def due_reminders():
