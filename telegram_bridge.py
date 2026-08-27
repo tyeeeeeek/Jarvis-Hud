@@ -10,12 +10,16 @@
 #   Locked to a single chat_id so a bot token leak or a guessed
 #   username can't hand a stranger command access to your PC.
 #
-#   Also accepts bank statement attachments -- CSV/TXT/PDF/XLSX/XLS/OFX/QFX,
-#   a ZIP of any of those, or a screenshot (sent as a photo or as a file):
-#   they're downloaded into a private inbox under ~/.jarvis, and the
-#   "sync statements" command (tools.sync_bank_data) moves whatever is
-#   waiting there into statements_service's "latest bank statements"
-#   folder before parsing it into the ledger. See import_latest_to().
+#   Also accepts bank statement attachments -- any file type/name a bank or
+#   phone hands us (CSV/TXT/PDF/XLSX/XLS/OFX/QFX/ZIP, a generically-named
+#   "document_<id>.pdf", or a screenshot sent as a photo or as a file): none
+#   of that is filtered by extension on receipt, since statements_service's
+#   parsers (and sync_bank_data's silent skip of anything unrecognized) are
+#   the ones equipped to judge what a file actually is. They're downloaded
+#   into a private inbox under ~/.jarvis, and the "sync statements" command
+#   (tools.sync_bank_data) moves whatever is waiting there into
+#   statements_service's "latest bank statements" folder before parsing it
+#   into the ledger. See import_latest_to().
 #
 #   Fully inert until TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are set
 #   in .env -- see README's "Text Jarvis (Telegram)" section.
@@ -41,14 +45,21 @@ TELEGRAM_AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 # to sync, never silently on receipt.
 INBOX_DIR = os.path.join(os.path.expanduser("~"), ".jarvis", "telegram_inbox")
 
-# Only formats statements_service actually knows how to parse. Every one of
-# these is read-only on receipt -- never executed, never opened in an
-# external viewer/macro-enabled app: CSV/TXT via csv.DictReader, PDF via
-# pypdf's text-layer extraction, XLSX/XLS via openpyxl's read-only cell
+# Formats statements_service actually has a parser for -- used only to pick
+# the confirmation wording below (a heads-up when we likely can't read a
+# file, e.g. a .heic photo or a .docx), never to reject a file on receipt.
+# Every one of these is read-only on receipt -- never executed, never opened
+# in an external viewer/macro-enabled app: CSV/TXT via csv.DictReader, PDF
+# via pypdf's text-layer extraction, XLSX/XLS via openpyxl's read-only cell
 # values (macros are never run), OFX/QFX via plain regex, images via OCR
 # (pixels only, through Pillow), and ZIPs via a path-traversal/zip-bomb
-# guarded extraction (see statements_service._extract_zip).
-_ALLOWED_EXTS = {
+# guarded extraction (see statements_service._extract_zip). A file with some
+# other extension (e.g. a bank's generic "document_<id>.pdf" -- already
+# covered above -- or a format we don't recognize at all) is still accepted:
+# it's saved and handed to sync_bank_data like any other, which walks by
+# extension and silently skips anything it has no parser for, rather than us
+# guessing wrong here.
+_KNOWN_EXTS = {
     ".csv", ".txt", ".ofx", ".qfx", ".pdf",
     ".xlsx", ".xls", ".zip",
     ".jpg", ".jpeg", ".png", ".webp",
@@ -96,20 +107,23 @@ def _save_incoming_file(filename, file_id):
         send_message("I downloaded that file but couldn't save it sir.")
         return
     print(f"  [Telegram] Saved document -> {dest}")
-    send_message(f"Got {filename} sir. Say \"sync statements\" and I'll import it.")
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in _KNOWN_EXTS:
+        send_message(f"Got {filename} sir. Say \"sync statements\" and I'll import it.")
+    else:
+        send_message(
+            f"Got {filename} sir -- I don't recognize that as a bank export format, but "
+            f"I'll take a look when you say \"sync statements\".")
 
 
 def _handle_document(document):
-    """Download an incoming file attachment into INBOX_DIR. Rejects anything
-    that isn't a statement-like format up front -- files here are only ever
-    read (never executed) by statements_service's parsers."""
+    """Download an incoming file attachment into INBOX_DIR. Accepts any file
+    type/name -- including a bank's generically-named "document_<id>.pdf" --
+    rather than rejecting on extension; files here are only ever read (never
+    executed) by statements_service's parsers, and sync_bank_data silently
+    skips anything it doesn't recognize at sync time rather than us guessing
+    wrong here on receipt."""
     filename = _sanitize_filename(document.get("file_name"))
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in _ALLOWED_EXTS:
-        send_message(
-            f"I can only import bank statement exports ({', '.join(sorted(_ALLOWED_EXTS))}) sir -- "
-            f"{filename} isn't one of those.")
-        return
     file_id = document.get("file_id")
     if not file_id:
         return
@@ -141,8 +155,12 @@ def import_latest_to(dest_dir):
     after this one. Returns the list of imported filenames."""
     if not os.path.isdir(INBOX_DIR):
         return []
+    # Every file waiting here was already accepted on receipt (see
+    # _handle_document) regardless of extension, so move all of them -- not
+    # just ones matching _KNOWN_EXTS -- and let statements_service.sync()
+    # decide what it can parse.
     pending = sorted(
-        (f for f in os.listdir(INBOX_DIR) if os.path.splitext(f)[1].lower() in _ALLOWED_EXTS),
+        (f for f in os.listdir(INBOX_DIR) if os.path.isfile(os.path.join(INBOX_DIR, f))),
         key=lambda f: os.path.getmtime(os.path.join(INBOX_DIR, f)),
     )
     if not pending:
