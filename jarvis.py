@@ -214,6 +214,26 @@ def _prep_tts_text(text):
     return re.sub(r'  +', ' ', result).strip()
 
 
+def _ensure_mixer():
+    """(Re)initialize the pygame mixer if it isn't currently running. Needed
+    because the mixer binds to whatever the default output device was at
+    init time -- if headphones/speakers get unplugged or switched afterward,
+    playback can start silently failing or erroring against a dead handle.
+    Call this before every playback attempt so a fresh device switch always
+    gets picked up rather than wedging audio output permanently."""
+    if not PYGAME_AVAILABLE:
+        return False
+    try:
+        if pygame.mixer.get_init() is not None:
+            return True
+        pygame.mixer.pre_init(44100, -16, 2, 512)
+        pygame.mixer.init()
+        return True
+    except Exception as e:
+        print(f"  [Audio Error] Couldn't init mixer: {e}")
+        return False
+
+
 def speak(text):
     if not text:
         return True
@@ -223,7 +243,7 @@ def speak(text):
     completed = True
     tts_text = _prep_tts_text(text)
 
-    if EDGE_TTS_AVAILABLE and PYGAME_AVAILABLE:
+    if EDGE_TTS_AVAILABLE and PYGAME_AVAILABLE and _ensure_mixer():
         tmp = os.path.join(tempfile.gettempdir(), f"jarvis_{threading.get_ident()}.mp3")
         try:
             loop = asyncio.new_event_loop()
@@ -245,6 +265,12 @@ def speak(text):
             except: pass
         except Exception as e:
             print(f"  [EdgeTTS error] {e}")
+            # The output device may have changed underneath the mixer (e.g.
+            # headphones unplugged mid-speech) -- tear it down so the next
+            # speak() call rebuilds it against whatever is now the default
+            # device, instead of repeatedly failing against a dead handle.
+            try: pygame.mixer.quit()
+            except Exception: pass
             completed = _speak_local_fallback(tts_text)
     else:
         completed = _speak_local_fallback(tts_text)
@@ -374,13 +400,37 @@ def start_ws_server():
 
 # ================================================================ MIC / VOSK THREADS
 def mic_thread():
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE, input=True, frames_per_buffer=CHUNK_SIZE)
+    # Runs as a daemon thread with no supervisor, so an unhandled exception
+    # here would silently kill wake-word listening for the rest of the
+    # session (e.g. a headset mic being unplugged/switched mid-stream raises
+    # OSError from stream.read()). Instead, treat device errors as
+    # recoverable: tear down and reopen against whatever the default input
+    # device now is, and keep retrying until pipeline_stop is set.
     while not pipeline_stop.is_set():
-        audio_queue.put(stream.read(CHUNK_SIZE, exception_on_overflow=False))
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+        p, stream = None, None
+        try:
+            p = pyaudio.PyAudio()
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=SAMPLE_RATE,
+                             input=True, frames_per_buffer=CHUNK_SIZE)
+            while not pipeline_stop.is_set():
+                audio_queue.put(stream.read(CHUNK_SIZE, exception_on_overflow=False))
+        except Exception as e:
+            if not pipeline_stop.is_set():
+                print(f"  [Mic Error] {e} -- reopening microphone")
+        finally:
+            try:
+                if stream is not None:
+                    stream.stop_stream()
+                    stream.close()
+            except Exception:
+                pass
+            try:
+                if p is not None:
+                    p.terminate()
+            except Exception:
+                pass
+        if not pipeline_stop.is_set():
+            time.sleep(1)
 
 
 def recognition_thread():

@@ -265,6 +265,8 @@ _APP_ALIASES_WIN = {
     "edge": "msedge", "discord": "discord", "steam": "steam",
     "slack": "slack", "zoom": "zoom", "photos": "ms-photos:",
     "snipping tool": "snippingtool", "camera": "microsoft.windows.camera:",
+    "powershell": "powershell", "windows powershell": "powershell",
+    "pwsh": "pwsh", "powershell 7": "pwsh", "powershell core": "pwsh",
 }
 _APP_IMAGE_NAMES_WIN = {
     "notepad": "notepad.exe", "calc": "CalculatorApp.exe", "explorer": None,  # never kill explorer
@@ -273,7 +275,8 @@ _APP_IMAGE_NAMES_WIN = {
     "chrome": "chrome.exe", "cmd": "cmd.exe", "wt": "WindowsTerminal.exe",
     "firefox": "firefox.exe", "msedge": "msedge.exe", "discord": "Discord.exe",
     "steam": "steam.exe", "slack": "slack.exe", "zoom": "Zoom.exe",
-    "snippingtool": "SnippingTool.exe",
+    "snippingtool": "SnippingTool.exe", "powershell": "powershell.exe",
+    "pwsh": "pwsh.exe",
 }
 
 # Linux: alias -> the actual binary name to launch/pkill. Verified against
@@ -292,6 +295,9 @@ _APP_ALIASES_LINUX = {
     "vs code": "code", "visual studio code": "code",
     "chrome": "google-chrome", "firefox": "firefox", "brave": "brave",
     "discord": "discord", "steam": "steam", "slack": "slack", "zoom": "zoom",
+    # PowerShell Core (pwsh) is cross-platform -- "powershell" is the natural
+    # spoken alias, "pwsh" the literal binary/package name.
+    "powershell": "pwsh", "pwsh": "pwsh", "windows powershell": "pwsh",
 }
 
 _APP_ALIASES = _APP_ALIASES_WIN if IS_WINDOWS else _APP_ALIASES_LINUX
@@ -300,7 +306,7 @@ _APP_IMAGE_NAMES = _APP_IMAGE_NAMES_WIN if IS_WINDOWS else None
 
 def launch_app(name: str) -> str:
     """Launch a known desktop application by common name (e.g. notepad,
-    calculator, file explorer, chrome, spotify, discord, vs code)."""
+    calculator, file explorer, chrome, spotify, discord, vs code, powershell)."""
     key = re.sub(r'^(the|a|an)\s+', '', (name or "").strip().lower())
     exe = _APP_ALIASES.get(key)
     if not exe:
