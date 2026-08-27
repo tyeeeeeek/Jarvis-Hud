@@ -307,6 +307,39 @@ couple of minutes — cheap and private, no per-check API cost.
 
 ---
 
+## "Jarvis, improve on..."
+
+Say or text something like *"Jarvis, improve your ability to run PowerShell commands"*
+or *"Jarvis, improve on playing YouTube videos without the window closing abruptly"*
+and it triggers a real, on-demand Claude Code pass scoped to exactly that — not a
+description of what it could do, an actual verified code change, committed to git.
+Same hard constraints and build/syntax verification gate as the nightly pass below,
+just triggered live instead of on a schedule. Can take a few minutes for anything
+nontrivial; you'll see a live activity indicator while it works.
+
+---
+
+## Always-on backend
+
+As of this update, closing the HUD window only closes the *visual* window — the
+Python backend (voice, texting, email watching, reminders) keeps running in the
+background regardless. `jarvis.py` refuses to start a second time if it's already
+running, so it's always safe to have both the Electron app and a background instance
+around at once; only one ever actually processes commands.
+
+**To make it start automatically at every login** (so you never have to open the HUD
+at all for texting/email-watching to work): create a shortcut to
+`launch_jarvis_backend.vbs` in your Windows Startup folder
+(`Win+R` → `shell:startup` → paste a shortcut to that file in there). This isn't set
+up automatically yet — ask if you want it done.
+
+**To start it manually right now**: double-click `launch_jarvis_backend.vbs`, or run
+`venv\Scripts\pythonw.exe jarvis.py` from the project folder.
+**To stop it**: find `pythonw.exe` in Task Manager and end it (there's currently no
+in-app "quit backend" command — worth adding if you find yourself doing this often).
+
+---
+
 ## 24/7 self-improvement
 
 A Windows Scheduled Task (`JarvisSelfImprove`, nightly at 3 AM) runs Claude Code
