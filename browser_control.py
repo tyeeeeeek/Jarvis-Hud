@@ -19,20 +19,55 @@ import concurrent.futures
 
 HOME = os.path.expanduser("~")
 PROFILE_DIR = os.path.join(HOME, ".jarvis-browser-profile")
+# Used only when the worker thread itself has to be abandoned because a
+# Playwright call hung instead of raising (see _submit's TimeoutError
+# handling below). Alternating between two fixed directories guarantees a
+# freshly-started worker never launches Chromium on the same profile
+# directory the just-abandoned (possibly still-alive, just unresponsive)
+# worker was using -- reusing that directory would mean deleting its
+# SingletonLock out from under a live process, which corrupts the profile
+# and was a likely source of repeat crashes.
+_PROFILE_DIRS = [PROFILE_DIR, PROFILE_DIR + "-alt"]
 
-_request_q: "queue.Queue" = queue.Queue()
-_worker_started = False
-_worker_lock = threading.Lock()
+# Chromium stability/resource flags. `--window-size`/`--window-position` are
+# cosmetic; the rest exist to stop the automated renderer from crashing or
+# hanging over long unattended playback sessions:
+#  - background timer/backgrounding throttling is meant for real user tabs
+#    that get covered/minimized -- for an unattended automation window it
+#    just adds another way playback can silently stall or wedge.
+#  - a persistent profile's disk cache grows without bound over a
+#    long-running session; capping it avoids the browser slowly starving
+#    itself of disk/memory headroom until the renderer gets OOM-killed.
+#  - --disable-dev-shm-usage avoids renderer crashes from small /dev/shm on
+#    constrained environments (Linux containers/VMs); harmless on Windows.
+_CHROMIUM_ARGS = [
+    "--window-size=900,700", "--window-position=100,100",
+    "--disable-features=CalculateNativeWinOcclusion",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-dev-shm-usage",
+    "--disk-cache-size=104857600",
+]
+
+_state_lock = threading.Lock()
+_current_queue = None
+_worker_alive = False
+_next_generation = 0
 
 
-def _ensure_worker():
-    global _worker_started
-    with _worker_lock:
-        if _worker_started:
-            return
-        t = threading.Thread(target=_worker_thread, name="BrowserControl", daemon=True)
-        t.start()
-        _worker_started = True
+def _start_worker_locked():
+    """Caller must hold _state_lock. Starts a fresh worker thread bound to
+    its own request queue and its own alternating profile directory."""
+    global _current_queue, _worker_alive, _next_generation
+    q: "queue.Queue" = queue.Queue()
+    profile_dir = _PROFILE_DIRS[_next_generation % len(_PROFILE_DIRS)]
+    _next_generation += 1
+    _current_queue = q
+    _worker_alive = True
+    t = threading.Thread(target=_worker_thread, args=(q, profile_dir),
+                          name="BrowserControl", daemon=True)
+    t.start()
 
 
 def _submit(fn, timeout=45, relaunch=True):
@@ -42,20 +77,41 @@ def _submit(fn, timeout=45, relaunch=True):
     the window has been closed or crashed there is nothing to control, so we
     raise a clear error instead of popping open a fresh blank browser window.
     """
-    _ensure_worker()
+    global _worker_alive
+    with _state_lock:
+        if not _worker_alive:
+            _start_worker_locked()
+        q = _current_queue
     fut: concurrent.futures.Future = concurrent.futures.Future()
-    _request_q.put((fn, fut, relaunch))
-    return fut.result(timeout=timeout)
+    q.put((fn, fut, relaunch))
+    try:
+        return fut.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        # Every Playwright call the worker makes on our behalf already has
+        # its own, shorter internal timeout (goto=20s, wait_for_selector=
+        # 15s, ...), so a request that still doesn't come back within our
+        # own timeout means the worker thread itself is wedged inside a
+        # Chromium call that hung instead of raising -- e.g. the browser
+        # process is a zombie. There is no reliable way to force-kill a
+        # blocked Python thread, so abandon it (it stays a daemon and can't
+        # block process exit) and let the *next* call spin up a brand-new
+        # worker + browser instead of leaving playback permanently dead.
+        with _state_lock:
+            if _current_queue is q:
+                _worker_alive = False
+        raise RuntimeError(
+            "the YouTube browser stopped responding, sir -- restarting it, please try again"
+        ) from None
 
 
-def _clear_stale_singleton_files():
+def _clear_stale_singleton_files(profile_dir):
     """If Chromium was killed or crashed instead of exiting cleanly, it can
     leave SingletonLock/SingletonCookie/SingletonSocket behind in the profile
     dir. A leftover lock makes the *next* launch_persistent_context fail
     outright, which used to permanently break playback until the whole app
     was restarted -- clear it before every (re)launch."""
     for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-        path = os.path.join(PROFILE_DIR, name)
+        path = os.path.join(profile_dir, name)
         try:
             if os.path.exists(path) or os.path.islink(path):
                 os.remove(path)
@@ -63,39 +119,47 @@ def _clear_stale_singleton_files():
             pass
 
 
-_page_crashed = {"flag": False}
+def _watch_page(context, page, active):
+    """Track this page as the one actively in use, and arm crash detection
+    for it. Returns a mutable {"crashed": bool} flag: page.is_closed() only
+    reflects an explicit close, not a renderer *crash* (tab dies but the
+    window/context stays open), which used to make every future request
+    retry the same dead page and fail in a loop forever."""
+    active["page"] = page
+    crash_flag = {"crashed": False}
+    page.on("crash", lambda _page: crash_flag.update(crashed=True))
+    return crash_flag
 
 
-def _watch_for_crash(page):
-    """Playwright's page.is_closed() only reflects an explicit close -- a
-    renderer *crash* (tab dies but the window/context stays open) leaves
-    is_closed() False forever, which used to make every future request retry
-    the same dead page and fail in a loop. Track crashes explicitly so
-    _is_usable() can tell the two apart."""
-    _page_crashed["flag"] = False
-    page.on("crash", lambda _page: _page_crashed.update(flag=True))
+def _watch_context_for_stray_pages(context, active):
+    """YouTube ads and "open in new tab" links can spawn extra pages in the
+    same context. Left alone these pile up as extra live renderer processes
+    over an unattended, long-running session -- a real source of the
+    resource exhaustion that leads to eventual crashes. Close anything that
+    isn't the one page we're actively tracking."""
+    def _on_page(new_page):
+        if new_page is not active.get("page"):
+            try:
+                new_page.close()
+            except Exception:
+                pass
+    context.on("page", _on_page)
 
 
-def _launch_context(p):
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    _clear_stale_singleton_files()
+def _launch_context(p, profile_dir, active):
+    os.makedirs(profile_dir, exist_ok=True)
+    _clear_stale_singleton_files(profile_dir)
     context = p.chromium.launch_persistent_context(
-        PROFILE_DIR, headless=False,
-        args=[
-            "--window-size=900,700", "--window-position=100,100",
-            # Windows suspends/throttles occluded (covered or minimized)
-            # Chromium windows by default, which can make an unattended
-            # playback window look stalled or dead -- keep it running.
-            "--disable-features=CalculateNativeWinOcclusion",
-        ],
+        profile_dir, headless=False, args=_CHROMIUM_ARGS,
     )
+    _watch_context_for_stray_pages(context, active)
     page = context.pages[0] if context.pages else context.new_page()
-    _watch_for_crash(page)
-    return context, page
+    crash_flag = _watch_page(context, page, active)
+    return context, page, crash_flag
 
 
-def _is_usable(page):
-    if page is None or _page_crashed["flag"]:
+def _is_usable(page, crash_flag):
+    if page is None or crash_flag is None or crash_flag["crashed"]:
         return False
     try:
         return not page.is_closed()
@@ -103,7 +167,7 @@ def _is_usable(page):
         return False
 
 
-def _recover(old_page, context, p):
+def _recover(old_page, context, p, profile_dir, active):
     """Get a fresh, working page. Prefers opening a new tab in the existing
     browser window (context still alive, e.g. only the tab crashed) over
     closing and relaunching the whole window, so a single crashed tab
@@ -120,34 +184,48 @@ def _recover(old_page, context, p):
                     old_page.close()
                 except Exception:
                     pass
-            _watch_for_crash(new_page)
-            return context, new_page
+            crash_flag = _watch_page(context, new_page, active)
+            return context, new_page, crash_flag
         try:
             context.close()
         except Exception:
             pass
-    return _launch_context(p)
+    return _launch_context(p, profile_dir, active)
 
 
-def _worker_thread():
+def _worker_thread(q: "queue.Queue", profile_dir):
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        context = page = None
+        context = page = crash_flag = None
+        active = {"page": None}
 
         while True:
-            fn, fut, relaunch = _request_q.get()
+            fn, fut, relaunch = q.get()
             if fn is None:  # shutdown sentinel
                 break
             try:
-                if not _is_usable(page):
+                if not _is_usable(page, crash_flag):
                     if not relaunch:
                         raise RuntimeError("no YouTube window is currently open")
                     # The tab crashed, the window was closed, or Chromium
                     # crashed entirely -- transparently heal instead of
                     # leaving playback dead.
-                    context, page = _recover(page, context, p)
-                result = fn(page)
+                    context, page, crash_flag = _recover(page, context, p, profile_dir, active)
+                try:
+                    result = fn(page)
+                except Exception:
+                    # A whole-browser-process crash (as opposed to just one
+                    # renderer/tab) doesn't always make context.new_page()
+                    # fail immediately -- the freshly "recovered" page can
+                    # still turn out to be dead on first real use. If that's
+                    # what happened, recover once more and retry within this
+                    # same request instead of surfacing a failure that would
+                    # have healed itself on the very next call anyway.
+                    if not relaunch or _is_usable(page, crash_flag):
+                        raise
+                    context, page, crash_flag = _recover(page, context, p, profile_dir, active)
+                    result = fn(page)
                 if not fut.done():
                     fut.set_result(result)
             except Exception as e:
@@ -163,8 +241,10 @@ def _worker_thread():
 
 def shutdown():
     """Best-effort graceful close, called from jarvis.py on exit."""
-    if _worker_started:
-        _request_q.put((None, concurrent.futures.Future(), True))
+    with _state_lock:
+        alive, q = _worker_alive, _current_queue
+    if alive and q is not None:
+        q.put((None, concurrent.futures.Future(), True))
 
 
 # ================================================================ ACTIONS
@@ -183,7 +263,7 @@ def play_youtube(query: str) -> str:
     if not query.strip():
         return "What should I play sir?"
     try:
-        title = _submit(lambda page: _do_play_youtube(query, page), timeout=45)
+        title = _submit(lambda page: _do_play_youtube(query, page), timeout=60)
         return f"Now playing {title} sir." if title else f"Playing {query} sir."
     except Exception as e:
         return f"I couldn't find that on YouTube sir: {e}"
