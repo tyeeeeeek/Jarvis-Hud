@@ -312,6 +312,13 @@ commands, so a leaked token can only be used to spam that one chat.
 
 Fully inert (no-op, no errors) until `JARVIS_CPU_ALERTS_BOT_TOKEN` is set.
 
+Don't want to wait for the next scheduled check or summary? Just ask Jarvis
+("what's the status of the CPU alerts agent?" / "send a test message from the
+watchdog bot") — `tools.agent_status()` reports whether each Telegram
+sub-agent is configured and when it last actually delivered (from the shared
+`~/.jarvis/telegram_delivery_log.jsonl`), and `tools.send_agent_test_message()`
+forces a one-off test send from either bot on demand.
+
 ---
 
 ## Daily self-improvement reports (JarvisImprovement)
@@ -339,6 +346,9 @@ a leaked token can only be used to spam that one chat.
    ```
 4. Restart Jarvis. No separate startup log line needed — it's called
    directly from `_improvement_watcher_thread` once the daily pass finishes.
+
+Same on-demand tools as JarvisCPU_Alerts above apply here too — ask for its
+status or a test send any time rather than waiting for the next 6 AM report.
 
 Fully inert (no-op, no errors) until `JARVIS_IMPROVEMENT_BOT_TOKEN` is set.
 

@@ -44,6 +44,7 @@ _TOOL_FUNCS = [
     tools.build_creation,
     tools.ask_claude_web,
     tools.self_improve,
+    tools.agent_status, tools.send_agent_test_message,
 ]
 
 for _fn in _TOOL_FUNCS:

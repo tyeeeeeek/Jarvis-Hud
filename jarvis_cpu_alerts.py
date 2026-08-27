@@ -54,3 +54,14 @@ def send_critical_alert(result_text: str) -> bool:
     waiting for the next scheduled summary. Tone stays blunt -- no
     hedging on something that actually needs action."""
     return _send(f"⚠️ WATCHDOG ALERT — fix this now: {result_text}")
+
+
+def send_test_message() -> bool:
+    """Manual, on-demand test send -- lets the user confirm this bot's
+    token/chat ID still deliver right now, without waiting for the next
+    scheduled health check. Called from tools.send_agent_test_message()
+    when the user asks Jarvis to test/ping this agent's Telegram channel.
+    A confirmed send lands in the shared delivery log same as any other
+    send from this agent, so it also shows up in agent_status()."""
+    return _send("WATCHDOG TEST — this is a manual test message, sir. If you're reading this, "
+                  "the JarvisCPU_Alerts Telegram pipeline is working.")

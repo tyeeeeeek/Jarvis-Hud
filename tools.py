@@ -45,6 +45,10 @@ try:
 except ImportError:
     TELEGRAM_AVAILABLE = False
 
+import telegram_common
+import jarvis_cpu_alerts
+import jarvis_improvement
+
 try:
     import browser_control; BROWSER_CONTROL_AVAILABLE = True
 except ImportError:
@@ -1145,3 +1149,124 @@ def run_daily_self_improve() -> dict:
         added = []
 
     return {"ok": True, "added": added, "timed_out": timed_out}
+
+
+# ================================================================ AGENT STATUS / MANUAL TELEGRAM TEST
+# On-demand visibility into the two background sub-agents (JarvisCPU_Alerts,
+# JarvisImprovement) that otherwise only speak up on their own schedules --
+# lets the user check whether each is configured and actually delivering,
+# and force a one-off test send instead of waiting for the next scheduled
+# health check or 6 AM report.
+_AGENT_ALIASES = {
+    "cpu_alerts": "JarvisCPU_Alerts", "cpu": "JarvisCPU_Alerts", "health": "JarvisCPU_Alerts",
+    "watchdog": "JarvisCPU_Alerts", "jarviscpu_alerts": "JarvisCPU_Alerts",
+    "improvement": "JarvisImprovement", "self_improvement": "JarvisImprovement",
+    "self improve": "JarvisImprovement", "jarvisimprovement": "JarvisImprovement",
+}
+
+
+def _resolve_agent(agent: str):
+    key = re.sub(r"[\s\-]+", "_", (agent or "").strip().lower())
+    name = _AGENT_ALIASES.get(key) or _AGENT_ALIASES.get(key.replace("_", " "))
+    if name == "JarvisCPU_Alerts":
+        return name, jarvis_cpu_alerts
+    if name == "JarvisImprovement":
+        return name, jarvis_improvement
+    return None, None
+
+
+def _read_jsonl_tail(path, max_lines=500):
+    """Best-effort JSONL reader -- skips any line that fails to parse rather
+    than failing the whole read, since these are append-only supervision
+    logs, not critical state."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-max_lines:]
+    except Exception:
+        return []
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def _last_delivery_for(agent_name):
+    last = None
+    for entry in _read_jsonl_tail(telegram_common.DELIVERY_LOG_PATH):
+        if entry.get("agent") == agent_name:
+            last = entry
+    return last
+
+
+def _fmt_ago(ts):
+    mins = (time.time() - ts) / 60
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins:.0f} min ago"
+    hours = mins / 60
+    if hours < 48:
+        return f"{hours:.1f} hr ago"
+    return f"{hours / 24:.1f} days ago"
+
+
+def agent_status() -> str:
+    """Report whether the JarvisCPU_Alerts (PC health watchdog) and
+    JarvisImprovement (daily self-improvement) Telegram sub-agents are
+    configured, and when each last actually delivered a message (from the
+    shared confirmed-delivery log), plus the most recent health check
+    result on file. Use this whenever the user asks how the watchdog/CPU
+    alerts or self-improvement agent is doing, whether it's still running,
+    or when it last sent something."""
+    lines = []
+
+    for label, name, mod in (
+        ("JarvisCPU_Alerts (PC health watchdog)", "JarvisCPU_Alerts", jarvis_cpu_alerts),
+        ("JarvisImprovement (daily self-improvement)", "JarvisImprovement", jarvis_improvement),
+    ):
+        if not mod.AVAILABLE:
+            lines.append(f"{label}: not configured -- missing bot token or chat ID.")
+            continue
+        last = _last_delivery_for(name)
+        if last:
+            preview = last.get("preview", "").replace("\n", " ")
+            lines.append(f"{label}: configured, last delivered {_fmt_ago(last['ts'])} -- \"{preview}\"")
+        else:
+            lines.append(f"{label}: configured, but no confirmed delivery on record yet.")
+
+    health_entries = _read_jsonl_tail(HEALTH_LOG_PATH, max_lines=1)
+    if health_entries:
+        h = health_entries[-1]
+        state = h.get("thermal_state", "unknown")
+        free_gb = h.get("free_gb")
+        lines.append(
+            f"Last health check ({_fmt_ago(h['ts'])}): thermal {state}, "
+            f"{free_gb:.1f} GB free, critical={h.get('critical', False)}."
+        )
+
+    return "Agent status sir:\n" + "\n".join(lines)
+
+
+def send_agent_test_message(agent: str) -> str:
+    """Force a one-off manual test Telegram message from either background
+    sub-agent right now, instead of waiting for its next scheduled send --
+    use this whenever the user asks to test, ping, or verify the CPU
+    alerts/watchdog or self-improvement Telegram bot. `agent` must identify
+    which one: e.g. "cpu_alerts"/"watchdog"/"health" for JarvisCPU_Alerts,
+    or "improvement"/"self_improvement" for JarvisImprovement. Returns
+    whether Telegram confirmed the send."""
+    name, mod = _resolve_agent(agent)
+    if not name:
+        return json.dumps({"ok": False, "message": f"I don't recognize the agent \"{agent}\" sir -- try \"cpu alerts\" or \"improvement\"."})
+    if not mod.AVAILABLE:
+        return json.dumps({"ok": False, "agent": name, "message": f"{name} isn't configured sir -- its bot token or chat ID is missing."})
+    ok = mod.send_test_message()
+    message = (f"Test message sent to {name} sir -- Telegram confirmed delivery." if ok else
+               f"Test send to {name} failed sir -- check the bot token, chat ID, and network.")
+    return json.dumps({"ok": ok, "agent": name, "message": message})

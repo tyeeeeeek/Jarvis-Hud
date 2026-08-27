@@ -62,3 +62,14 @@ def send_report(added, timed_out=False) -> bool:
     if timed_out:
         text += "\n\n(Hit the 2-hour time box -- more queued and ready for tomorrow's pass.)"
     return _send(text)
+
+
+def send_test_message() -> bool:
+    """Manual, on-demand test send -- lets the user confirm this bot's
+    token/chat ID still deliver right now, without waiting for the next
+    6 AM report. Called from tools.send_agent_test_message() when the
+    user asks Jarvis to test/ping this agent's Telegram channel. A
+    confirmed send lands in the shared delivery log same as any other
+    send from this agent, so it also shows up in agent_status()."""
+    return _send("This is a manual test message, sir -- if you're reading this, "
+                  "the JarvisImprovement Telegram pipeline is working.")
