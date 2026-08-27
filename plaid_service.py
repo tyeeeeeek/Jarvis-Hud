@@ -248,4 +248,4 @@ def start_server():
         app.run(host="127.0.0.1", port=PORT, use_reloader=False)
     threading.Thread(target=_run, daemon=True, name="PlaidServer").start()
     print(f"  [Plaid] Local API -> http://localhost:{PORT} (configured: {_is_configured()})")
-    print(f"  [Statements] Drop CSV exports in {statements_service.STATEMENTS_DIR}")
+    print(f"  [Statements] Drop CSV or PDF exports in {statements_service.STATEMENTS_DIR}")

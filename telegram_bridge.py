@@ -10,7 +10,7 @@
 #   Locked to a single chat_id so a bot token leak or a guessed
 #   username can't hand a stranger command access to your PC.
 #
-#   Also accepts file attachments (bank statement CSV/OFX/QFX exports):
+#   Also accepts file attachments (bank statement CSV/OFX/QFX/PDF exports):
 #   they're downloaded into a private inbox under ~/.jarvis, and the
 #   "sync statements" command (tools.sync_bank_data) moves whatever is
 #   waiting there into statements_service's "latest bank statements"
@@ -40,11 +40,12 @@ TELEGRAM_AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 # to sync, never silently on receipt.
 INBOX_DIR = os.path.join(os.path.expanduser("~"), ".jarvis", "telegram_inbox")
 
-# Only formats statements_service actually knows how to parse (CSV, plus
-# a couple of extensions some banks use for the same delimited-text
-# format). Deliberately no PDFs/images/archives -- nothing here is ever
-# executed or opened, only read as text by the CSV parser.
-_ALLOWED_EXTS = {".csv", ".txt", ".ofx", ".qfx"}
+# Only formats statements_service actually knows how to parse: CSV (plus a
+# couple of extensions some banks use for the same delimited-text format)
+# and PDF. Deliberately no images/archives/other document types -- files
+# here are never executed or opened in a viewer, only read as text (via
+# csv.DictReader or pypdf's text-layer extraction).
+_ALLOWED_EXTS = {".csv", ".txt", ".ofx", ".qfx", ".pdf"}
 
 
 def send_message(text: str) -> bool:
@@ -72,12 +73,12 @@ def _download_file(file_id):
 def _handle_document(document):
     """Download an incoming file attachment into INBOX_DIR. Rejects anything
     that isn't a statement-like format up front -- files here are only ever
-    read as text by statements_service's CSV parser, never executed."""
+    read as text by statements_service's CSV/PDF parsers, never executed."""
     filename = _sanitize_filename(document.get("file_name"))
     ext = os.path.splitext(filename)[1].lower()
     if ext not in _ALLOWED_EXTS:
         send_message(
-            f"I can only import bank statement exports (.csv, .txt, .ofx, .qfx) sir -- "
+            f"I can only import bank statement exports (.csv, .txt, .ofx, .qfx, .pdf) sir -- "
             f"{filename} isn't one of those.")
         return
     file_id = document.get("file_id")

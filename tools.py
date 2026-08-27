@@ -773,9 +773,9 @@ def sync_bank_data() -> str:
     any "sync statements", "sync my bank data", or "import my statements"
     request. First imports whatever file(s) the user has most recently sent
     as an attachment to the Telegram bot into the "latest bank statements"
-    folder, then parses every CSV statement (that folder plus anything
-    dropped directly in JarvisStatements) into the local transaction store
-    that get_spending_summary reads from."""
+    folder, then parses every CSV or PDF statement (that folder plus
+    anything dropped directly in JarvisStatements) into the local
+    transaction store that get_spending_summary reads from."""
     if not STATEMENTS_AVAILABLE:
         return "Statement syncing isn't set up sir."
     imported = []
@@ -790,7 +790,7 @@ def sync_bank_data() -> str:
         return f"I couldn't sync your statements sir: {e}"
     if result["files_seen"] == 0:
         return ("I didn't find any statement files to sync sir. Send one to the Telegram bot "
-                 "or drop your CSVs in the JarvisStatements folder first.")
+                 "or drop your CSVs or PDFs in the JarvisStatements folder first.")
     prefix = f"Imported {len(imported)} file(s) you sent over Telegram and synced sir. " if imported else "Synced sir. "
     return f"{prefix}Found {result['new_transactions']} new transactions across {result['files_seen']} files."
 
@@ -813,8 +813,8 @@ def get_spending_summary() -> str:
             return f"I couldn't reach Plaid just now sir: {e}"
     if summary is None:
         return ("I don't have any spending data yet sir. Send me a bank statement over Telegram "
-                 "and say sync statements, drop CSVs in the JarvisStatements folder, or connect a "
-                 "bank in the Finance widget.")
+                 "and say sync statements, drop CSVs or PDFs in the JarvisStatements folder, or "
+                 "connect a bank in the Finance widget.")
     if not summary["by_category"]:
         return "No transactions found for the last thirty days sir."
     top = summary["by_category"][0]

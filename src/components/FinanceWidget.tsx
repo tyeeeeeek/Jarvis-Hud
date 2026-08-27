@@ -119,7 +119,7 @@ export function FinanceWidget() {
       {status === "error" && <span className="w-error">SENSOR OFFLINE</span>}
       {status === "not_configured" && (
         <>
-          <span className="w-idle">DROP CSVs IN JARVISSTATEMENTS, OR SEND VIA TELEGRAM</span>
+          <span className="w-idle">DROP CSVs/PDFs IN JARVISSTATEMENTS, OR SEND VIA TELEGRAM</span>
           <div className="w-divider" />
           <button className="w-fin-connect" onClick={syncStatements}>SYNC STATEMENTS</button>
         </>
