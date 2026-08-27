@@ -499,9 +499,10 @@ def _clear_temp_folder(path):
             pass
 
 
-def clean_disk() -> str:
-    """Clear the OS temp folder and empty the Recycle Bin. Never touches user
-    files or documents."""
+def _do_clean_disk():
+    """Shared by clean_disk and check_system_health: clear the OS temp
+    folder and empty the Recycle Bin, returning the bytes freed. Never
+    touches user files or documents."""
     _, _, free_before = shutil.disk_usage(_DISK_ROOT)
     _clear_temp_folder(tempfile.gettempdir())
     try:
@@ -518,8 +519,131 @@ def clean_disk() -> str:
     except Exception:
         pass
     _, _, free_after = shutil.disk_usage(_DISK_ROOT)
-    freed = max(0, free_after - free_before)
+    return max(0, free_after - free_before)
+
+
+def clean_disk() -> str:
+    """Clear the OS temp folder and empty the Recycle Bin. Never touches user
+    files or documents."""
+    freed = _do_clean_disk()
     return f"Done sir. Cleared temporary files and the recycle bin, freeing up {_human_size(freed)}."
+
+
+# ================================================================ SYSTEM HEALTH
+HEALTH_LOG_PATH = os.path.join(JARVIS_DIR, "health_log.jsonl")
+
+# Priority order for picking the single "headline" temperature to report when
+# several sensors are readable -- prefer the actual CPU package/die sensor
+# over ambient/chipset ones.
+_TEMP_ZONE_PRIORITY = ("x86_pkg_temp", "cpu_thermal", "k10temp", "acpitz", "pch_skylake")
+_TEMP_WARN_C = 85.0
+_TEMP_CRITICAL_C = 95.0
+_DISK_LOW_FREE_GB = 10.0
+
+
+def _read_linux_temps():
+    """Read every plausible thermal zone under /sys/class/thermal, in
+    Celsius. No extra dependency needed -- the kernel exposes these directly."""
+    temps = {}
+    base = "/sys/class/thermal"
+    if not os.path.isdir(base):
+        return temps
+    for entry in os.listdir(base):
+        if not entry.startswith("thermal_zone"):
+            continue
+        zdir = os.path.join(base, entry)
+        try:
+            with open(os.path.join(zdir, "type"), "r", encoding="utf-8") as f:
+                zone_type = f.read().strip()
+            with open(os.path.join(zdir, "temp"), "r", encoding="utf-8") as f:
+                raw = int(f.read().strip())
+        except Exception:
+            continue
+        c = raw / 1000.0
+        # Disabled/unpopulated sensors commonly read as -273 (absolute
+        # zero) or other nonsense -- skip anything outside a plausible range.
+        if -20.0 <= c <= 150.0:
+            temps[zone_type] = c
+    return temps
+
+
+def _read_windows_temps():
+    """Best-effort CPU temp via WMI's MSAcpi_ThermalZoneTemperature. Often
+    needs the `wmi` package and admin rights; returns empty if unavailable
+    rather than failing the whole health check."""
+    try:
+        import wmi
+        w = wmi.WMI(namespace="root\\wmi")
+        temps = {}
+        for i, zone in enumerate(w.MSAcpi_ThermalZoneTemperature()):
+            c = (zone.CurrentTemperature / 10.0) - 273.15
+            if -20.0 <= c <= 150.0:
+                temps[f"zone{i}"] = c
+        return temps
+    except Exception:
+        return {}
+
+
+def _hottest_reading(temps):
+    if not temps:
+        return None, None
+    for key in _TEMP_ZONE_PRIORITY:
+        if key in temps:
+            return key, temps[key]
+    hottest_zone = max(temps, key=temps.get)
+    return hottest_zone, temps[hottest_zone]
+
+
+def _log_health_event(entry):
+    _ensure_jarvis_dir()
+    entry = dict(entry, ts=time.time())
+    try:
+        with open(HEALTH_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def check_system_health() -> str:
+    """Run a PC stabilization/health check: read CPU/system thermal sensors
+    and flag any overheating risk, and check free disk space -- if it's
+    running low, automatically clear temp files and empty the Recycle Bin.
+    Every run is appended to ~/.jarvis/health_log.jsonl. Safe to call anytime
+    on demand; also runs automatically in the background every 2 hours."""
+    temps = _read_windows_temps() if IS_WINDOWS else _read_linux_temps()
+    zone, hottest = _hottest_reading(temps)
+    zone_label = zone.replace("_", " ") if zone else ""
+
+    if hottest is None:
+        thermal_note = "I couldn't read a temperature sensor on this machine sir."
+        thermal_state = "unknown"
+    elif hottest >= _TEMP_CRITICAL_C:
+        thermal_note = (f"Your {zone_label} is at {hottest:.0f}°C sir -- that's a real "
+                         f"overheating risk, you should let it cool down.")
+        thermal_state = "critical"
+    elif hottest >= _TEMP_WARN_C:
+        thermal_note = f"Your {zone_label} is running warm at {hottest:.0f}°C sir, worth keeping an eye on."
+        thermal_state = "warning"
+    else:
+        thermal_note = f"Temperatures look fine sir, {zone_label} is at {hottest:.0f}°C."
+        thermal_state = "ok"
+
+    _total, _used, free = shutil.disk_usage(_DISK_ROOT)
+    free_gb = free / (1024 ** 3)
+    cleaned = free_gb < _DISK_LOW_FREE_GB
+    freed_bytes = _do_clean_disk() if cleaned else 0
+    disk_note = (
+        f"Disk space was low ({free_gb:.1f} GB free) so I cleared temp files and the recycle "
+        f"bin, freeing {_human_size(freed_bytes)} sir." if cleaned else
+        f"Disk space is fine sir, {free_gb:.1f} GB free."
+    )
+
+    _log_health_event({
+        "thermal_state": thermal_state, "hottest_zone": zone, "hottest_c": hottest,
+        "free_gb": round(free_gb, 1), "cleaned": cleaned, "freed_bytes": freed_bytes,
+    })
+
+    return f"{thermal_note} {disk_note}"
 
 
 # ================================================================ FINANCE (unchanged services, thin wrappers)

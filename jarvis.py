@@ -596,6 +596,30 @@ def _reminder_watcher_thread():
         time.sleep(20)
 
 
+_HEALTH_CHECK_INTERVAL_SECONDS = 2 * 60 * 60
+
+
+def _health_watcher_thread():
+    """Runs check_system_health() immediately, then every 2 hours for as
+    long as Jarvis's backend is running -- overheating risk and low-disk
+    cleanup, logged to ~/.jarvis/health_log.jsonl every time. Only speaks up
+    if something's actually critical, so it stays quiet in the normal case."""
+    while not pipeline_stop.is_set():
+        try:
+            result = tools.check_system_health()
+            print(f"  [Health] {result}")
+        except Exception as e:
+            print(f"  [Health] {e}")
+            result = ""
+        if "overheating risk" in result:
+            text = f"Health check sir: {result}"
+            with _command_lock:
+                speak(text)
+            _notify_all(text)
+        if pipeline_stop.wait(_HEALTH_CHECK_INTERVAL_SECONDS):
+            break
+
+
 def _on_important_email(category, summary):
     text = f"You've got an important email sir: {summary}"
     with _command_lock:
@@ -703,6 +727,7 @@ def voice_loop():
     threading.Thread(target=mic_thread, daemon=True, name="Mic").start()
     threading.Thread(target=recognition_thread, daemon=True, name="Vosk").start()
     threading.Thread(target=_reminder_watcher_thread, daemon=True, name="Reminders").start()
+    threading.Thread(target=_health_watcher_thread, daemon=True, name="Health").start()
     threading.Thread(target=_sms_command_thread, daemon=True, name="SMS").start()
     threading.Thread(target=_telegram_command_thread, daemon=True, name="Telegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
