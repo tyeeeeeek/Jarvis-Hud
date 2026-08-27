@@ -1,5 +1,5 @@
 # ================================================================
-#   J.A.R.V.I.S — Browser control (YouTube playback)
+#   J.A.R.V.I.S — Browser control (general browsing + YouTube playback)
 #
 #   Owns one persistent, visible Chromium instance driven by
 #   Playwright's SYNC API, confined to a single dedicated worker
@@ -7,11 +7,21 @@
 #   share a thread with an asyncio loop). Every call from tools.py
 #   goes through a small thread-safe request queue.
 #
-#   Deliberately narrow: the only exposed actions are "search
-#   YouTube and click play" and basic playback control on that same
-#   tab -- no generic "click anything on any page" tool.
+#   Routing general web opens through this same dedicated,
+#   Jarvis-owned window (instead of tools.py firing webbrowser.open()
+#   at whatever the OS's default-browser association happens to be)
+#   is deliberate: it's the one browser Jarvis actually holds a
+#   handle to, so it's the one Jarvis can reliably navigate, re-use,
+#   and bring to the front on demand -- an OS-launched default
+#   browser process is fire-and-forget with no such guarantee.
+#
+#   Still deliberately narrow: every exposed action is a specific,
+#   named operation (open a URL, read the page back, search YouTube
+#   and click play, basic playback control) -- no generic "click
+#   anything on any page" / "run this JS" tool.
 # ================================================================
 import os
+import re
 import queue
 import threading
 import urllib.parse
@@ -54,6 +64,11 @@ _state_lock = threading.Lock()
 _current_queue = None
 _worker_alive = False
 _next_generation = 0
+
+# Raised on the worker thread (relaunch=False) when there's no live page to
+# act on; matched by string in control()/read_page() to give a friendlier
+# reply than the raw RuntimeError.
+_NOT_OPEN_ERR = "no browser window is currently open"
 
 
 def _start_worker_locked():
@@ -100,7 +115,7 @@ def _submit(fn, timeout=45, relaunch=True):
             if _current_queue is q:
                 _worker_alive = False
         raise RuntimeError(
-            "the YouTube browser stopped responding, sir -- restarting it, please try again"
+            "the browser window stopped responding, sir -- restarting it, please try again"
         ) from None
 
 
@@ -207,7 +222,7 @@ def _worker_thread(q: "queue.Queue", profile_dir):
             try:
                 if not _is_usable(page, crash_flag):
                     if not relaunch:
-                        raise RuntimeError("no YouTube window is currently open")
+                        raise RuntimeError(_NOT_OPEN_ERR)
                     # The tab crashed, the window was closed, or Chromium
                     # crashed entirely -- transparently heal instead of
                     # leaving playback dead.
@@ -248,6 +263,75 @@ def shutdown():
 
 
 # ================================================================ ACTIONS
+def _focus_window(page):
+    """Raise the actual OS-level window, not just the in-browser tab.
+    page.bring_to_front() alone only activates the tab -- it does nothing if
+    the window itself was minimized or is sitting behind other windows,
+    which is exactly the "browser doesn't visibly come to the front" failure
+    mode. Best-effort: swallow errors, since a stray/half-closed window
+    target can make the CDP call fail even though the page itself is fine."""
+    page.bring_to_front()
+    try:
+        cdp = page.context.new_cdp_session(page)
+        window_id = cdp.send("Browser.getWindowForTarget").get("windowId")
+        if window_id is not None:
+            cdp.send("Browser.setWindowBounds",
+                     {"windowId": window_id, "bounds": {"windowState": "normal"}})
+    except Exception:
+        pass
+
+
+def _do_open_url(url, page):
+    page.goto(url, timeout=20000)
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
+    _focus_window(page)
+    return (page.title() or "").strip()
+
+
+def open_url(url: str) -> str:
+    """Navigate the one dedicated, visible Jarvis browser window to any URL
+    and bring it to the front -- reuses the same persistent window as
+    YouTube playback instead of the OS default-browser association, so
+    Jarvis actually holds a handle it can reliably re-focus."""
+    url = (url or "").strip()
+    if not url:
+        return "What page should I open sir?"
+    try:
+        title = _submit(lambda page: _do_open_url(url, page), timeout=45)
+        return f"Opened {title} sir." if title else f"Opened {url} sir."
+    except Exception as e:
+        return f"I couldn't open that sir: {e}"
+
+
+def _do_read_page(page):
+    title = (page.title() or "").strip()
+    try:
+        text = page.inner_text("body", timeout=5000)
+    except Exception:
+        text = ""
+    text = re.sub(r'\s+', ' ', text).strip()
+    return title, text[:4000]
+
+
+def read_page() -> str:
+    """Read back the title and visible text of whatever page is currently
+    open in the dedicated Jarvis browser window -- lets Jarvis summarize or
+    answer questions about a page it (or the user, in that same window) just
+    opened, without a generic "run arbitrary JS" tool."""
+    try:
+        title, text = _submit(_do_read_page, timeout=20, relaunch=False)
+    except Exception as e:
+        if _NOT_OPEN_ERR in str(e):
+            return "There's no page open in the browser right now sir."
+        return f"I couldn't read that page sir: {e}"
+    if not text:
+        return f"There's no readable text on {title or 'this page'} sir."
+    return f"{title}: {text}" if title else text
+
+
 def _do_play_youtube(query, page):
     page.goto("https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(query), timeout=20000)
     page.wait_for_selector("ytd-video-renderer a#video-title", timeout=15000)
@@ -255,7 +339,7 @@ def _do_play_youtube(query, page):
     title = (first.get_attribute("title") or "").strip()
     first.click()
     page.wait_for_selector("video", timeout=15000)
-    page.bring_to_front()
+    _focus_window(page)
     return title
 
 
@@ -288,6 +372,6 @@ def control(action: str) -> str:
         return {"play_pause": "Toggling playback sir.", "next": "Restarting the video sir.",
                 "mute": "Muting sir."}[action]
     except Exception as e:
-        if "no YouTube window is currently open" in str(e):
+        if _NOT_OPEN_ERR in str(e):
             return "There's no YouTube video playing right now sir."
         return f"I couldn't control the YouTube tab sir: {e}"

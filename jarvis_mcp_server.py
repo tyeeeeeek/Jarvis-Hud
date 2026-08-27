@@ -34,6 +34,7 @@ _TOOL_FUNCS = [
     tools.launch_app, tools.close_app,
     tools.media_control,
     tools.open_website, tools.search_web, tools.play_youtube, tools.youtube_control,
+    tools.read_webpage,
     tools.get_weather,
     tools.draft_email,
     tools.check_disk_space, tools.clean_disk, tools.check_system_health,

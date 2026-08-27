@@ -419,26 +419,48 @@ def _resolve_url(target):
 
 
 def open_website(target: str) -> str:
-    """Open a website in the user's default browser -- a known site name
-    (youtube, gmail, github, netflix, ...), a raw domain, or free text (which
-    becomes a Google search). For actually searching-and-playing something on
-    YouTube, use play_youtube instead."""
+    """Open a website in the dedicated, visible Jarvis browser window and
+    bring it to the front -- a known site name (youtube, gmail, github,
+    netflix, ...), a raw domain, or free text (which becomes a Google
+    search). Reuses the same persistent, Jarvis-controlled Chromium window as
+    play_youtube so it can be reliably re-focused, falling back to the OS
+    default browser only if that dedicated window is unavailable. For
+    actually searching-and-playing something on YouTube, use play_youtube
+    instead."""
+    url = _resolve_url(target)
+    if BROWSER_CONTROL_AVAILABLE:
+        return browser_control.open_url(url)
+    label = target if target in _SITE_ALIASES or "." in (target or "") else f"a search for {target}"
     try:
-        webbrowser.open(_resolve_url(target))
-        label = target if target in _SITE_ALIASES or "." in (target or "") else f"a search for {target}"
+        if not webbrowser.open(url):
+            return f"I couldn't find a browser to open {label} with sir."
         return f"Opening {label} sir."
     except Exception as e:
         return f"I couldn't open that sir: {e}"
 
 
 def search_web(query: str) -> str:
-    """Open a Google search results page for the given query in the default
-    browser."""
+    """Open a Google search results page for the given query in the
+    dedicated Jarvis browser window."""
+    url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query or "")
+    if BROWSER_CONTROL_AVAILABLE:
+        return browser_control.open_url(url)
     try:
-        webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote_plus(query or ""))
+        if not webbrowser.open(url):
+            return "I couldn't find a browser to search with sir."
         return f"Searching for {query} sir."
     except Exception as e:
         return f"I couldn't search for that sir: {e}"
+
+
+def read_webpage() -> str:
+    """Read back the title and visible text of whatever page is currently
+    open in the dedicated Jarvis browser window (the one open_website /
+    play_youtube control) -- use this to summarize or answer questions about
+    a page that was just opened."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return "I can't read browser pages sir -- the browser control module isn't available."
+    return browser_control.read_page()
 
 
 def play_youtube(query: str) -> str:
@@ -510,7 +532,8 @@ def draft_email(recipient: str = "", subject: str = "") -> str:
     if recipient:
         params["to"] = recipient
     try:
-        webbrowser.open("https://mail.google.com/mail/?" + urllib.parse.urlencode(params))
+        if not webbrowser.open("https://mail.google.com/mail/?" + urllib.parse.urlencode(params)):
+            return "I couldn't find a browser to open that draft with sir."
         return f"Opening a draft{' to ' + recipient if recipient else ''}{' about ' + subject if subject else ''} sir. You'll need to hit send yourself."
     except Exception as e:
         return f"I couldn't open that draft sir: {e}"
