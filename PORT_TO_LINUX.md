@@ -73,6 +73,38 @@ If you're ever unsure whether an adaptation is safe, stop and ask the user rathe
 guessing — same rule the nightly self-improvement agent follows (see
 `self_improve.md`).
 
+## Critical: this machine is REPLACING the Windows machine as the live Jarvis, not running alongside it
+
+The user's Windows PC currently has a live `jarvis.py` running in the background,
+polling the SAME Telegram bot (and possibly Twilio number, and Gmail) that's
+configured in the `.env` on this USB. **If two machines both poll the same Telegram
+bot / phone number / inbox at once, every text gets processed and replied to twice**
+(each machine tracks its own independent read-offset, so both will see and act on the
+same incoming message) — and worse, any command with a real side effect (creating a
+file, sending something, running the self-improve agent) would happen twice
+independently. This is not a hypothetical, it will definitely happen if both are live
+at once.
+
+So: you can freely set up, build, and test almost everything here WITHOUT this risk —
+running `tools.py` functions directly in a Python shell, testing `build_creation`,
+testing `play_youtube`, even running `jarvis.py` itself as long as you either (a) use
+placeholder/blank Telegram+Twilio+Gmail values in a *copy* of `.env` for initial
+testing, or (b) confirm with the user first that the Windows instance is stopped.
+
+**Before you ever start `jarvis.py` here using the REAL `.env` from the USB (real
+Telegram token, etc.) as a persistent, ongoing background process**: stop and ask the
+user to confirm the Windows machine's Jarvis backend is stopped. They can do this
+themselves (Task Manager → end any `pythonw.exe` processes, and remove
+`JarvisBackend.lnk` from `shell:startup` so it doesn't restart), or ask their Windows
+Claude Code session to do it. Don't just assume it's fine to proceed — this is exactly
+the kind of "genuinely unsure, ask the user" moment called out above, and getting it
+wrong means the user gets duplicate texts and possibly duplicate real actions taken on
+their behalf.
+
+Once you've confirmed the cutover and this machine is the sole active instance, that's
+the point where you also set up the autostart systemd service (see below) so it
+becomes the permanent home for this.
+
 ## What's already been made Linux-aware (verify, don't assume correct)
 
 - `jarvis.py`: `win32com`/SAPI TTS is Windows-only-guarded; added an `espeak`/`espeak-ng`
@@ -124,6 +156,17 @@ guessing — same rule the nightly self-improvement agent follows (see
 
 ## Setup steps
 
+0. Run the preflight check first (it's also on the USB root, no cloning needed):
+   ```bash
+   bash /media/<mount>/preflight_check.sh
+   ```
+   Fix anything it reports missing before continuing. In particular: if Node is
+   missing or older than 18, install it via NodeSource, not the default Ubuntu apt
+   package (which is typically far too old):
+   ```bash
+   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+   sudo apt install -y nodejs
+   ```
 1. Copy the project off the USB (don't run it directly from the USB — it's likely
    NTFS and slower, and file permissions/symlinks behave oddly on NTFS-on-Linux):
    ```bash
@@ -135,27 +178,31 @@ guessing — same rule the nightly self-improvement agent follows (see
    ```
 2. Python side:
    ```bash
-   sudo apt install -y portaudio19-dev python3-venv
+   sudo apt install -y portaudio19-dev python3-venv python3-pip espeak-ng alsa-utils xdg-utils
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
    playwright install chromium
-   playwright install-deps   # if it complains about missing system libraries
+   playwright install-deps   # installs the system libs headed Chromium needs; needs sudo
    ```
 3. Frontend side:
    ```bash
    npm install
    npm run build
    ```
-4. Test the backend standalone first (easier to debug than through Electron):
+4. **Stop — this is the coordination checkpoint from above.** Before running
+   `jarvis.py` with the real `.env` (the one with a real Telegram bot token in it),
+   confirm with the user that the Windows instance is stopped. Don't skip this and
+   don't assume; ask explicitly. Once confirmed:
    ```bash
    venv/bin/python jarvis.py
    ```
-   Watch the terminal output — it should print the WebSocket server line, and (if
-   Telegram creds are in `.env`) `[Telegram] Watching for messages from chat ...`.
-   Message the existing Telegram bot from the user's phone and confirm you get a
-   reply — that's the best end-to-end proof that the brain, MCP tools, and Telegram
-   bridge all actually work here, and it doesn't depend on audio hardware at all.
+   Watch the terminal output — it should print the WebSocket server line, and
+   `[Telegram] Watching for messages from chat ...`. Message the existing Telegram bot
+   from the user's phone and confirm you get exactly one reply (not zero, not two) —
+   that's the best end-to-end proof the brain, MCP tools, and Telegram bridge all
+   actually work here, it doesn't depend on audio hardware at all, and the cutover was
+   clean.
 5. Only after that works, test voice (if mic/speakers are present) and the full
    Electron HUD (`npm start`).
 6. Set up the systemd user service(s) for autostart / nightly self-improve as
