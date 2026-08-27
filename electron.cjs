@@ -107,21 +107,13 @@ function createWindow() {
     if (isQuitting) return;
     e.preventDefault();
     isQuitting = true;
+    // Deliberately does NOT kill pythonProcess anymore. jarvis.py is now a
+    // persistent background service (voice, texting, email watching, the
+    // reminder clock) meant to keep running whether or not this window is
+    // open -- see the JarvisBackend scheduled task in the README. Closing
+    // the HUD just closes the visual window.
     mainWindow.webContents.send("app-closing");
-    setTimeout(() => {
-      if (pythonProcess) {
-        // Plain .kill() only ends the immediate pythonw.exe process -- once
-        // browser_control.py launches a real Chromium child, that would be
-        // left running as an orphan every time the HUD closes. Kill the
-        // whole process tree instead.
-        if (process.platform === "win32") {
-          try { spawn("taskkill", ["/PID", String(pythonProcess.pid), "/T", "/F"]); } catch {}
-        } else {
-          try { pythonProcess.kill(); } catch {}
-        }
-      }
-      app.quit();
-    }, 800);
+    setTimeout(() => app.quit(), 300);
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

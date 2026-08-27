@@ -42,6 +42,7 @@ _TOOL_FUNCS = [
     tools.set_reminder, tools.add_note, tools.list_notes,
     tools.build_creation,
     tools.ask_claude_web,
+    tools.self_improve,
 ]
 
 for _fn in _TOOL_FUNCS:

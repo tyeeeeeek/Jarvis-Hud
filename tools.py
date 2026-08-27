@@ -672,3 +672,76 @@ def ask_claude_web(question: str) -> str:
         return "That took too long sir."
     except Exception as e:
         return f"I couldn't reach my other brain sir: {e}"
+
+
+# ================================================================ ON-DEMAND SELF-IMPROVEMENT
+# "Jarvis, improve your ability to X" -- triggers a real, verified, nested
+# Claude Code pass that actually changes and commits code, not just a
+# description of what could be done. Same hard constraints as the nightly
+# self_improve.md pass; keep the two in sync if either changes.
+_IMPROVE_CONSTRAINTS = (
+    "Hard constraints, never violate: never add a general shell-exec tool to "
+    "jarvis_mcp_server.py's exposed tool set -- every capability must stay a "
+    "specific, narrow, named function in tools.py; never widen the _SAFE_DIRS "
+    "filesystem scope beyond a clearly-reasonable named folder; never make "
+    "delete_item bypass the Recycle Bin; never let close_app target anything "
+    "outside the curated _APP_ALIASES/_APP_IMAGE_NAMES list; never make "
+    "draft_email send automatically; never weaken CreationPanel.tsx's iframe "
+    "sandboxing or build_creation's network/localStorage restrictions; never "
+    "touch files outside this project folder. Before committing: run a Python "
+    "syntax check on every changed .py file, and `npm run build` if any "
+    "frontend file changed; if either fails, fix it or revert rather than "
+    "leaving the repo broken. Commit with git and a clear message describing "
+    "what changed and why. If the requested improvement genuinely can't be "
+    "done safely within these constraints, don't force it -- explain why not "
+    "instead."
+)
+
+
+def self_improve(focus: str) -> str:
+    """Trigger a real, verified, autonomous improvement to one of Jarvis's own
+    capabilities. Use this whenever the user asks Jarvis to improve, get
+    better at, upgrade, work on, or fix something about ITSELF -- e.g.
+    "improve your ability to run PowerShell commands" or "improve on playing
+    YouTube videos without the window closing abruptly". This makes a real
+    code change to this project, verifies it builds/compiles, and commits it
+    to git -- not just a description of what could be done. Can take several
+    minutes; the user will see a live indicator while it works."""
+    if not focus or not focus.strip():
+        return json.dumps({"ok": False, "message": "What should I improve sir?"})
+    if not os.path.exists(CLAUDE_CLI):
+        return json.dumps({"ok": False, "message": "I can't find Claude Code on this system sir."})
+
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    prompt = (
+        "The user just asked you, live, to improve one specific thing about "
+        f"yourself (Jarvis): \"{focus.strip()}\"\n\n"
+        "Investigate the relevant code in this project, make a real, working "
+        "improvement, and verify it. " + _IMPROVE_CONSTRAINTS
+    )
+    try:
+        result = subprocess.run(
+            [CLAUDE_CLI, "-p", prompt,
+             "--permission-mode", "bypassPermissions",
+             "--tools", "Read Write Edit Glob Grep Bash",
+             "--allowedTools", "Read Write Edit Glob Grep Bash"],
+            cwd=project_dir, capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({"ok": False, "message": "That took too long sir, I stopped waiting -- but I may have made partial progress, worth checking git log."})
+    except Exception as e:
+        return json.dumps({"ok": False, "message": f"Something went wrong sir: {e}"})
+
+    try:
+        log = subprocess.run(["git", "-C", project_dir, "log", "-1", "--format=%h %s"],
+                              capture_output=True, text=True, timeout=10)
+        latest_commit = log.stdout.strip()
+    except Exception:
+        latest_commit = ""
+
+    summary = (result.stdout or "").strip()
+    return json.dumps({
+        "ok": True, "focus": focus.strip(),
+        "summary": summary[-800:] if summary else "No summary returned.",
+        "latest_commit": latest_commit,
+    })

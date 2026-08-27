@@ -28,7 +28,7 @@ VENV_PYTHON = os.path.join(_HERE, "venv", "Scripts", "python.exe")
 MCP_SERVER_SCRIPT = os.path.join(_HERE, "jarvis_mcp_server.py")
 MCP_CONFIG_PATH = os.path.join(tempfile.gettempdir(), "jarvis_mcp_config.json")
 
-TIMEOUT_SECS = 720  # generous -- build_creation alone can take up to 600s
+TIMEOUT_SECS = 900  # generous -- build_creation/self_improve can each take up to 600s
 
 PERSONA = (
     "You are J.A.R.V.I.S, a capable voice assistant with real tools to "
@@ -58,6 +58,7 @@ _CAPTION_OVERRIDES = {
     "play_youtube": lambda a: f"Searching YouTube for {a.get('query', 'that')}",
     "youtube_control": lambda a: "Controlling YouTube playback",
     "build_creation": lambda a: f"Building {a.get('description', 'that')}",
+    "self_improve": lambda a: f"Working on improving {a.get('focus', 'myself')} -- this may take a few minutes",
     "get_weather": lambda a: f"Checking the weather in {a.get('city', 'your area')}",
     "ask_claude_web": lambda a: "Researching that",
     "open_website": lambda a: f"Opening {a.get('target', 'that')}",

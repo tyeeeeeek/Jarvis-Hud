@@ -25,7 +25,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = io.StringIO()
 
-import os, re, json, time, queue, random, asyncio, webbrowser
+import os, re, json, time, queue, random, asyncio, webbrowser, socket
 import tempfile, threading, zipfile, urllib.request
 
 from dotenv import load_dotenv
@@ -312,6 +312,22 @@ def _ws_server_thread():
             await asyncio.Future()
 
     _ws_loop.run_until_complete(_run())
+
+
+def _already_running():
+    """Jarvis now runs as a persistent background process (see the
+    JarvisBackend scheduled task), independent of whether the HUD window is
+    open. The Electron app still tries to spawn jarvis.py itself as a
+    dev-mode convenience -- this makes that harmless instead of a port
+    conflict or, worse, a second instance double-polling Telegram/SMS and
+    replying to every text twice."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("localhost", WS_PORT))
+        s.close()
+        return False
+    except OSError:
+        return True
 
 
 def start_ws_server():
@@ -620,6 +636,12 @@ def handle_command(command, acked=False, notify=None):
 # ================================================================ VOICE LOOP
 def voice_loop():
     global _sapi_speaker
+
+    if _already_running():
+        print(f"  [Startup] Jarvis is already running on port {WS_PORT} sir -- "
+              f"this instance is exiting rather than double-processing commands.")
+        pipeline_stop.set()
+        return
 
     if PYGAME_AVAILABLE:
         try:
