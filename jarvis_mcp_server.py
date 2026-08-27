@@ -37,6 +37,7 @@ _TOOL_FUNCS = [
     tools.get_weather,
     tools.draft_email,
     tools.check_disk_space, tools.clean_disk, tools.check_system_health,
+    tools.system_power,
     tools.sync_bank_data, tools.get_spending_summary,
     tools.enable_eyes, tools.disable_eyes, tools.describe_screen,
     tools.set_reminder, tools.add_note, tools.list_notes,

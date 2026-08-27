@@ -711,6 +711,52 @@ def check_system_health() -> str:
     return f"{thermal_note} {disk_note}"
 
 
+def system_power(action: str, delay_minutes: float = 1) -> str:
+    """Shut down, restart, or cancel a pending shutdown/restart of THIS
+    computer -- the one Jarvis is running on, not a remote machine. action
+    must be one of: shutdown, restart, cancel. Defaults to a 1-minute delay
+    so a wall message warns whoever's on the machine and it can still be
+    cancelled (call this again with action="cancel") -- only pass
+    delay_minutes=0 if the user explicitly says "now"/"immediately". Note
+    this will also stop Jarvis's own backend, since it runs on this same
+    machine."""
+    action = (action or "").strip().lower()
+    if action not in ("shutdown", "restart", "cancel"):
+        return f"I don't recognize '{action}' sir -- action must be shutdown, restart, or cancel."
+
+    shutdown_bin = "shutdown.exe" if IS_WINDOWS else "shutdown"
+
+    try:
+        if action == "cancel":
+            cmd = [shutdown_bin, "/a"] if IS_WINDOWS else [shutdown_bin, "-c"]
+            result = subprocess.run(cmd, capture_output=True, timeout=10, text=True)
+            if IS_WINDOWS and result.returncode != 0:
+                return "There wasn't a shutdown or restart scheduled to cancel, sir."
+            return "Cancelled the pending shutdown, sir."
+
+        delay_minutes = max(0.0, float(delay_minutes))
+
+        if IS_WINDOWS:
+            flag = "/s" if action == "shutdown" else "/r"
+            cmd = [shutdown_bin, flag, "/t", str(int(delay_minutes * 60))]
+        else:
+            when = "now" if delay_minutes == 0 else f"+{max(1, round(delay_minutes))}"
+            flag = "-h" if action == "shutdown" else "-r"
+            cmd = [shutdown_bin, flag, when]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=10, text=True)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            return f"I couldn't {action} the PC sir: {detail or 'unknown error'}"
+
+        verb = "Shutting down" if action == "shutdown" else "Restarting"
+        if delay_minutes == 0:
+            return f"{verb} now, sir."
+        return f"{verb} in {delay_minutes:g} minute(s), sir. Say 'cancel shutdown' if you change your mind."
+    except Exception as e:
+        return f"I couldn't {action} the PC sir: {e}"
+
+
 # ================================================================ FINANCE (unchanged services, thin wrappers)
 def sync_bank_data() -> str:
     """Sync the latest bank transactions into Jarvis's records. Call this on

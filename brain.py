@@ -89,6 +89,12 @@ _CAPTION_OVERRIDES = {
     "check_disk_space": lambda a: "Checking disk space",
     "clean_disk": lambda a: "Cleaning up disk space",
     "media_control": lambda a: "Adjusting playback",
+    "system_power": lambda a: (
+        "Cancelling the pending shutdown" if a.get("action") == "cancel"
+        else f"Restarting the PC{'' if float(a.get('delay_minutes', 1) or 0) == 0 else ' shortly'}"
+        if a.get("action") == "restart"
+        else f"Shutting down the PC{'' if float(a.get('delay_minutes', 1) or 0) == 0 else ' shortly'}"
+    ),
 }
 
 
