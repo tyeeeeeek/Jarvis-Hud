@@ -1035,6 +1035,7 @@ def self_improve(focus: str) -> str:
     if not focus or not focus.strip():
         return json.dumps({"ok": False, "message": "What should I improve sir?"})
     if not os.path.exists(CLAUDE_CLI):
+        _report_ondemand_improve(focus, False, "Claude Code not found on this system.")
         return json.dumps({"ok": False, "message": "I can't find Claude Code on this system sir."})
 
     project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1053,8 +1054,10 @@ def self_improve(focus: str) -> str:
             cwd=project_dir, capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired:
+        _report_ondemand_improve(focus, False, "hit the time box before finishing -- may have made partial progress.")
         return json.dumps({"ok": False, "message": "That took too long sir, I stopped waiting -- but I may have made partial progress, worth checking git log."})
     except Exception as e:
+        _report_ondemand_improve(focus, False, str(e))
         return json.dumps({"ok": False, "message": f"Something went wrong sir: {e}"})
 
     try:
@@ -1064,12 +1067,24 @@ def self_improve(focus: str) -> str:
     except Exception:
         latest_commit = ""
 
+    _report_ondemand_improve(focus, True, latest_commit=latest_commit)
     summary = (result.stdout or "").strip()
     return json.dumps({
         "ok": True, "focus": focus.strip(),
         "summary": summary[-800:] if summary else "No summary returned.",
         "latest_commit": latest_commit,
     })
+
+
+def _report_ondemand_improve(focus: str, ok: bool, summary: str = "", latest_commit: str = "") -> None:
+    """Best-effort push of a JarvisImprovement Telegram update after every
+    on-demand self_improve() run -- a delivery failure here (bot not
+    configured, network hiccup) must never surface as a self_improve
+    failure to the user, so any error is swallowed."""
+    try:
+        jarvis_improvement.send_ondemand_report(focus, ok, summary=summary, latest_commit=latest_commit)
+    except Exception:
+        pass
 
 
 # ================================================================ SCHEDULED DAILY SELF-IMPROVEMENT

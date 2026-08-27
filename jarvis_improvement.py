@@ -64,6 +64,28 @@ def send_report(added, timed_out=False) -> bool:
     return _send(text)
 
 
+def send_ondemand_report(focus: str, ok: bool, summary: str = "", latest_commit: str = "") -> bool:
+    """Sent once after every on-demand self_improve(focus) run -- i.e. every
+    time the user asks Jarvis, live, to improve/upgrade/fix one of its own
+    capabilities (distinct from send_report(), which only covers the daily
+    6 AM audit). `focus` is what the user asked to have improved; `ok`
+    mirrors self_improve()'s own success flag; `latest_commit` (if any) is
+    the `git log -1` line captured right after the run, used here to prove
+    a real, verified change landed rather than just describing one. A
+    confirmed send lands in the shared delivery log same as any other send
+    from this agent, so it also shows up in agent_status()."""
+    focus = (focus or "").strip() or "something"
+    if not ok:
+        reason = summary.strip() if summary else "hit a problem partway through."
+        text = f"Asked to improve \"{focus}\" -- couldn't finish: {reason}"
+    elif latest_commit:
+        text = f"Asked to improve \"{focus}\" -- done and committed: {latest_commit}"
+    else:
+        text = (f"Asked to improve \"{focus}\" -- looked into it, but nothing safe "
+                "and verifiable to commit came out of this pass.")
+    return _send(text)
+
+
 def send_test_message() -> bool:
     """Manual, on-demand test send -- lets the user confirm this bot's
     token/chat ID still deliver right now, without waiting for the next
