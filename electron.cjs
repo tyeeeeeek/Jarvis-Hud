@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, screen } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
@@ -67,9 +67,16 @@ function startPython() {
 }
 
 function createWindow() {
+  // Size to the actual display's work area (not a fixed 1400x900) so the HUD
+  // fills the screen it's launched on -- a NUC hooked up to a TV has a much
+  // bigger work area than a laptop panel, and the widget layout in
+  // ArcReactor.tsx positions everything as a percentage of window size, so
+  // it only spreads out correctly once the window itself is full-size.
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    width,
+    height,
     minWidth: 480,
     minHeight: 360,
     frame: false,
@@ -103,6 +110,7 @@ function createWindow() {
   }
 
   mainWindow.once("ready-to-show", () => {
+    mainWindow.maximize();
     mainWindow.show();
   });
 
