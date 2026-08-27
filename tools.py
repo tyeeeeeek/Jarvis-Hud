@@ -322,8 +322,18 @@ def launch_app(name: str) -> str:
             subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               start_new_session=True)
         return f"Opening {name} sir."
-    except Exception:
+    except FileNotFoundError:
         return f"{name} doesn't appear to be installed sir."
+    except OSError as e:
+        # os.startfile() on Windows (and Popen on Linux) raise OSError for
+        # failures beyond "not installed" too -- e.g. a PowerShell/Terminal
+        # install that's present but broken, permission denied, or (on
+        # Windows) no handler registered for a URI-style target like
+        # ms-settings:. Surface the real reason instead of always blaming
+        # "not installed", which used to mask genuine, diagnosable failures.
+        return f"I couldn't open {name} sir: {e.strerror or e}"
+    except Exception as e:
+        return f"I couldn't open {name} sir: {e}"
 
 
 def close_app(name: str) -> str:
