@@ -21,6 +21,8 @@
 # ================================================================
 import os, sys, json, shutil, tempfile, subprocess, threading
 
+import tools
+
 HOME = os.path.expanduser("~")
 CLAUDE_CLI = shutil.which("claude") or os.path.join(
     HOME, ".local", "bin", "claude.exe" if sys.platform == "win32" else "claude")
@@ -42,7 +44,11 @@ PERSONA = (
     "aloud by a text-to-speech engine: keep it under 40 words, short natural "
     "sentences, no markdown, no bullet points, no emoji, never say your own "
     "name. If a tool result already gave the key information, confirm it "
-    "briefly rather than repeating it verbatim."
+    "briefly rather than repeating it verbatim. You may be given a short "
+    "recap of recent conversation (possibly from an earlier session) before "
+    "the current request -- use it naturally to stay consistent and resolve "
+    "references like \"it\" or \"that\", but never read the recap back to "
+    "the user or mention that you were given one."
 )
 
 
@@ -115,8 +121,10 @@ def run_agent(command, on_activity=None, on_creation=None):
         return None
 
     config_path = _ensure_mcp_config()
+    history = tools.recent_conversation_context()
+    prompt = f"{history}\n\nCurrent request: {command}" if history else command
     argv = [
-        CLAUDE_CLI, "-p", command,
+        CLAUDE_CLI, "-p", prompt,
         "--mcp-config", config_path, "--strict-mcp-config",
         "--tools", "",
         "--allowedTools", "mcp__jarvis__*",
@@ -196,5 +204,11 @@ def run_agent(command, on_activity=None, on_creation=None):
         except Exception:
             try: proc.kill()
             except Exception: pass
+
+    if final_text:
+        try:
+            tools.record_conversation_turn(command, final_text)
+        except Exception:
+            pass
 
     return final_text

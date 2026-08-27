@@ -99,6 +99,48 @@ def _set_state(key, value):
     _save_json(STATE_PATH, state)
 
 
+# ---- Conversation continuity -----------------------------------------
+# brain.py runs every voice command as a brand-new, otherwise-stateless
+# Claude Code CLI call (see its --no-session-persistence note) -- with
+# nothing else in place, Jarvis would forget "it"/"that"/"like I said"
+# the instant one command finished, even within the same sitting, and
+# obviously across full app restarts. This on-disk log is the fix: brain.py
+# records each (command, reply) pair here and reads the last few back in
+# as context for the next command, so continuity survives both between
+# commands and across separate app sessions.
+CONVERSATION_LOG_PATH = os.path.join(JARVIS_DIR, "conversation_log.json")
+_CONVERSATION_LOG_MAX_TURNS = 40       # how many turns are kept on disk
+_CONVERSATION_CONTEXT_MAX_TURNS = 6    # how many of those go back into the next prompt
+_CONVERSATION_FIELD_MAX_CHARS = 400    # cap per-field so the log can't grow unbounded
+
+
+def record_conversation_turn(command: str, reply: str):
+    """Not an MCP tool -- called directly by brain.py after each command
+    finishes, so the next command (even in a future app session) can be
+    given a short recap of what was just discussed."""
+    if not command or not reply:
+        return
+    log = _load_json(CONVERSATION_LOG_PATH, [])
+    log.append({
+        "command": command[:_CONVERSATION_FIELD_MAX_CHARS],
+        "reply": reply[:_CONVERSATION_FIELD_MAX_CHARS],
+        "ts": time.time(),
+    })
+    _save_json(CONVERSATION_LOG_PATH, log[-_CONVERSATION_LOG_MAX_TURNS:])
+
+
+def recent_conversation_context(max_turns: int = _CONVERSATION_CONTEXT_MAX_TURNS) -> str:
+    """Not an MCP tool -- called directly by brain.py to build a short recap
+    of recent turns (possibly from a previous session) to prepend to the
+    next command."""
+    log = _load_json(CONVERSATION_LOG_PATH, [])
+    if not log:
+        return ""
+    recent = log[-max_turns:]
+    lines = [f"User: {t.get('command', '')}\nYou: {t.get('reply', '')}" for t in recent]
+    return "Recent conversation for context (most recent last):\n" + "\n".join(lines)
+
+
 # ---- Safe directories -------------------------------------------------
 # Every filesystem tool is jailed to this fixed set of folders. Never widen
 # this to an arbitrary path -- add a new named key instead.
