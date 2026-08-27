@@ -10,7 +10,8 @@
 #   Locked to a single chat_id so a bot token leak or a guessed
 #   username can't hand a stranger command access to your PC.
 #
-#   Also accepts file attachments (bank statement CSV/OFX/QFX/PDF exports):
+#   Also accepts bank statement attachments -- CSV/TXT/PDF/XLSX/XLS/OFX/QFX,
+#   a ZIP of any of those, or a screenshot (sent as a photo or as a file):
 #   they're downloaded into a private inbox under ~/.jarvis, and the
 #   "sync statements" command (tools.sync_bank_data) moves whatever is
 #   waiting there into statements_service's "latest bank statements"
@@ -40,12 +41,18 @@ TELEGRAM_AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 # to sync, never silently on receipt.
 INBOX_DIR = os.path.join(os.path.expanduser("~"), ".jarvis", "telegram_inbox")
 
-# Only formats statements_service actually knows how to parse: CSV (plus a
-# couple of extensions some banks use for the same delimited-text format)
-# and PDF. Deliberately no images/archives/other document types -- files
-# here are never executed or opened in a viewer, only read as text (via
-# csv.DictReader or pypdf's text-layer extraction).
-_ALLOWED_EXTS = {".csv", ".txt", ".ofx", ".qfx", ".pdf"}
+# Only formats statements_service actually knows how to parse. Every one of
+# these is read-only on receipt -- never executed, never opened in an
+# external viewer/macro-enabled app: CSV/TXT via csv.DictReader, PDF via
+# pypdf's text-layer extraction, XLSX/XLS via openpyxl's read-only cell
+# values (macros are never run), OFX/QFX via plain regex, images via OCR
+# (pixels only, through Pillow), and ZIPs via a path-traversal/zip-bomb
+# guarded extraction (see statements_service._extract_zip).
+_ALLOWED_EXTS = {
+    ".csv", ".txt", ".ofx", ".qfx", ".pdf",
+    ".xlsx", ".xls", ".zip",
+    ".jpg", ".jpeg", ".png", ".webp",
+}
 
 
 def send_message(text: str) -> bool:
@@ -70,20 +77,9 @@ def _download_file(file_id):
     return resp.content
 
 
-def _handle_document(document):
-    """Download an incoming file attachment into INBOX_DIR. Rejects anything
-    that isn't a statement-like format up front -- files here are only ever
-    read as text by statements_service's CSV/PDF parsers, never executed."""
-    filename = _sanitize_filename(document.get("file_name"))
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in _ALLOWED_EXTS:
-        send_message(
-            f"I can only import bank statement exports (.csv, .txt, .ofx, .qfx, .pdf) sir -- "
-            f"{filename} isn't one of those.")
-        return
-    file_id = document.get("file_id")
-    if not file_id:
-        return
+def _save_incoming_file(filename, file_id):
+    """Shared by _handle_document and _handle_photo: download file_id and
+    stash it in INBOX_DIR under a timestamp-prefixed (collision-proof) name."""
     try:
         data = _download_file(file_id)
     except Exception as e:
@@ -101,6 +97,40 @@ def _handle_document(document):
         return
     print(f"  [Telegram] Saved document -> {dest}")
     send_message(f"Got {filename} sir. Say \"sync statements\" and I'll import it.")
+
+
+def _handle_document(document):
+    """Download an incoming file attachment into INBOX_DIR. Rejects anything
+    that isn't a statement-like format up front -- files here are only ever
+    read (never executed) by statements_service's parsers."""
+    filename = _sanitize_filename(document.get("file_name"))
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in _ALLOWED_EXTS:
+        send_message(
+            f"I can only import bank statement exports ({', '.join(sorted(_ALLOWED_EXTS))}) sir -- "
+            f"{filename} isn't one of those.")
+        return
+    file_id = document.get("file_id")
+    if not file_id:
+        return
+    _save_incoming_file(filename, file_id)
+
+
+def _handle_photo(photo_sizes):
+    """Screenshots of a banking app or a statement (photographed or
+    screenshotted) usually arrive as a compressed Telegram 'photo', not a
+    'document'. Telegram sends several resolutions of the same image --
+    grab the largest for the clearest OCR read later. Named uniquely from
+    the file_id so back-to-back screenshots in the same second never
+    collide/overwrite each other in INBOX_DIR."""
+    if not photo_sizes:
+        return
+    largest = max(photo_sizes, key=lambda p: p.get("file_size") or (p.get("width", 0) * p.get("height", 0)))
+    file_id = largest.get("file_id")
+    if not file_id:
+        return
+    suffix = re.sub(r"[^A-Za-z0-9]", "", file_id)[-10:] or "img"
+    _save_incoming_file(f"statement_photo_{suffix}.jpg", file_id)
 
 
 def import_latest_to(dest_dir):
@@ -178,6 +208,16 @@ def poll_thread(on_command, pipeline_stop):
                     except Exception as e:
                         print(f"  [Telegram] Document handling error: {e}")
                         send_message("Something went wrong saving that file sir.")
+                    continue
+
+                photo = message.get("photo")
+                if photo:
+                    print(f"  [Telegram] Received photo ({len(photo)} size(s))")
+                    try:
+                        _handle_photo(photo)
+                    except Exception as e:
+                        print(f"  [Telegram] Photo handling error: {e}")
+                        send_message("Something went wrong saving that photo sir.")
                     continue
 
                 text = (message.get("text") or "").strip()

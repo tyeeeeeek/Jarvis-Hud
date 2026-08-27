@@ -772,10 +772,12 @@ def sync_bank_data() -> str:
     """Sync the latest bank transactions into Jarvis's records. Call this on
     any "sync statements", "sync my bank data", or "import my statements"
     request. First imports whatever file(s) the user has most recently sent
-    as an attachment to the Telegram bot into the "latest bank statements"
-    folder, then parses every CSV or PDF statement (that folder plus
-    anything dropped directly in JarvisStatements) into the local
-    transaction store that get_spending_summary reads from."""
+    (as a document or a screenshot/photo) to the Telegram bot into the
+    "latest bank statements" folder, then parses every statement file found
+    there (plus anything dropped directly in JarvisStatements) into the
+    local transaction store that get_spending_summary reads from --
+    whatever the format (CSV, TXT, PDF, XLSX/XLS, OFX/QFX, a screenshot, or
+    a ZIP bundling any of those) and whatever it's named."""
     if not STATEMENTS_AVAILABLE:
         return "Statement syncing isn't set up sir."
     imported = []
@@ -790,7 +792,8 @@ def sync_bank_data() -> str:
         return f"I couldn't sync your statements sir: {e}"
     if result["files_seen"] == 0:
         return ("I didn't find any statement files to sync sir. Send one to the Telegram bot "
-                 "or drop your CSVs or PDFs in the JarvisStatements folder first.")
+                 "(CSV, TXT, PDF, XLSX, OFX/QFX, a screenshot, or a ZIP) or drop it in the "
+                 "JarvisStatements folder first.")
     prefix = f"Imported {len(imported)} file(s) you sent over Telegram and synced sir. " if imported else "Synced sir. "
     return f"{prefix}Found {result['new_transactions']} new transactions across {result['files_seen']} files."
 

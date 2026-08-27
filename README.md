@@ -162,7 +162,7 @@ venv\Scripts\python.exe jarvis.py
 ├── self_improve.md           # Instructions + hard guardrails for the nightly agent
 ├── run_self_improve.ps1      # Wrapper the JarvisSelfImprove scheduled task runs
 ├── plaid_service.py          # Bank-linking Flask service (finance widget)
-├── statements_service.py     # CSV/PDF bank-statement ledger (finance widget)
+├── statements_service.py     # bank-statement ledger: CSV/TXT/PDF/XLSX/OFX/QFX/images/ZIP (finance widget)
 ├── requirements.txt          # Python dependencies
 ├── src/
 │   ├── main.tsx                    # React entry point
