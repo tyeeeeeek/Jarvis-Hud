@@ -15,7 +15,6 @@ import os
 import re
 import csv
 import json
-import glob
 import hashlib
 from datetime import datetime, timedelta
 
@@ -249,16 +248,27 @@ def _parse_pdf_file(path):
     return rows
 
 
+_PARSERS_BY_EXT = {".csv": _parse_csv_file, ".pdf": _parse_pdf_file}
+
+
 def sync():
     ensure_statements_dir()
     ledger = _load_ledger()
     new_count = 0
     files_seen = 0
-    # Recursive so files imported into the "latest bank statements"
-    # subfolder (via telegram_bridge.import_latest_to) get picked up too,
-    # not just ones dropped directly in STATEMENTS_DIR.
-    for pattern, parser in (("*.csv", _parse_csv_file), ("*.pdf", _parse_pdf_file)):
-        for path in glob.glob(os.path.join(STATEMENTS_DIR, "**", pattern), recursive=True):
+    # Walked (not glob("*.csv")/glob("*.pdf")) so any arbitrarily-named
+    # attachment is picked up regardless of extension case -- glob patterns
+    # are case-sensitive on Linux/Mac, so a bank/phone sending "Statement.PDF"
+    # or "eStatement.Pdf" would otherwise be silently skipped. Recursive so
+    # files imported into the "latest bank statements" subfolder (via
+    # telegram_bridge.import_latest_to) get picked up too, not just ones
+    # dropped directly in STATEMENTS_DIR.
+    for root, _dirs, files in os.walk(STATEMENTS_DIR):
+        for name in files:
+            parser = _PARSERS_BY_EXT.get(os.path.splitext(name)[1].lower())
+            if parser is None:
+                continue
+            path = os.path.join(root, name)
             files_seen += 1
             for tx in parser(path):
                 fp = _fingerprint(tx["date"], tx["description"], tx["amount"])
