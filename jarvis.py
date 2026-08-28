@@ -631,6 +631,67 @@ def _on_brain_activity(text):
     _ws_broadcast({"type": "activity", "text": text})
 
 
+# The currently in-flight brain subprocess (if any), tracked so "cancel job"
+# can interrupt a long-running command (self_improve/hire_employee can take
+# up to 10 minutes) without waiting for it to finish on its own. Guarded by
+# its own lock, separate from _command_lock, on purpose: the thread running
+# the job holds _command_lock for the job's whole duration, so a cancel has
+# to reach in from outside that lock rather than queue behind it.
+_active_job_lock = threading.Lock()
+_active_job = None  # {"proc": Popen, "cancelled": bool} or None
+_JOB_CANCEL_PHRASES = (
+    "cancel job", "cancel the job", "cancel that job",
+    "stop job", "stop the job", "stop that job",
+    "never mind the job", "never mind that job",
+)
+
+
+def _register_active_job(proc):
+    global _active_job
+    record = {"proc": proc, "cancelled": False}
+    with _active_job_lock:
+        _active_job = record
+    return record
+
+
+def _clear_active_job(record):
+    global _active_job
+    with _active_job_lock:
+        if _active_job is record:
+            _active_job = None
+
+
+def _cancel_active_job():
+    """Best-effort kill of the active job's whole process tree. Returns True
+    if there was a job running to cancel, False if there was nothing to do."""
+    with _active_job_lock:
+        record = _active_job
+    if not record or record["proc"].poll() is not None:
+        return False
+    record["cancelled"] = True
+    proc = record["proc"]
+    try:
+        if IS_WINDOWS:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            if IS_WINDOWS:
+                # CTRL_BREAK_EVENT didn't finish the job in time -- taskkill
+                # /T reaches the whole process tree, not just proc itself,
+                # same reason killpg is used on the POSIX side above.
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                capture_output=True, timeout=10)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait(timeout=5)
+    except Exception as e:
+        print(f"  [Cancel Job] {e}")
+    return True
+
+
 def _on_brain_creation(payload):
     path = payload.get("path")
     try:
@@ -889,6 +950,21 @@ def handle_command(command, acked=False, notify=None):
     speaking it aloud -- used to text an SMS-originated command's answer
     back, regardless of which channel (voice/typed/SMS) the command came
     from."""
+    # Checked before _command_lock on purpose: if a job (self_improve /
+    # hire_employee, which can run for minutes) is in flight, the thread that
+    # started it is holding _command_lock for the whole duration, so a
+    # cancel has to interrupt from outside that lock rather than queue
+    # behind it and only "cancel" after the job already finished on its own.
+    if command.lower().strip() in _JOB_CANCEL_PHRASES:
+        def _cancel_reply(text):
+            if notify:
+                try: notify(text)
+                except Exception as e: print(f"  [Notify Error] {e}")
+            return speak(text)
+        if _cancel_active_job():
+            return _cancel_reply("Cancelled that job sir -- stopping it now.")
+        return _cancel_reply("There's no job running right now sir.")
+
     with _command_lock:
         cmd = command.lower().strip()
 
@@ -944,7 +1020,21 @@ def handle_command(command, acked=False, notify=None):
             speak(random.choice(_INLINE_CONFIRMS))
 
         set_status("Thinking")
-        reply = brain.run_agent(command, on_activity=_on_brain_activity, on_creation=_on_brain_creation)
+        job_record = None
+
+        def _on_process(proc):
+            nonlocal job_record
+            job_record = _register_active_job(proc)
+
+        reply = brain.run_agent(command, on_activity=_on_brain_activity,
+                                 on_creation=_on_brain_creation, on_process=_on_process)
+        if job_record is not None:
+            was_cancelled = job_record["cancelled"]
+            _clear_active_job(job_record)
+            if was_cancelled:
+                # The "cancel job" fast path already replied -- don't also
+                # speak a stray fallback reply for the command it cancelled.
+                return None
         if reply is None:
             set_status("Processing (offline)")
             reply = ask_ollama(command)

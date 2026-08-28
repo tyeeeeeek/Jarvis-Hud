@@ -125,7 +125,7 @@ def _caption_for(name, args, meta_display_name):
     return short.replace("_", " ").capitalize()
 
 
-def run_agent(command, on_activity=None, on_creation=None):
+def run_agent(command, on_activity=None, on_creation=None, on_process=None):
     """Run one voice command through the Claude tool-calling brain.
 
     on_activity(text): called as soon as each tool call starts (before it
@@ -133,6 +133,14 @@ def run_agent(command, on_activity=None, on_creation=None):
     on_creation(payload): called with the parsed build_creation tool result
         dict ({"ok", "kind", "title", "path"}) the moment it's available,
         without waiting for Claude's closing remark.
+    on_process(proc): called with the Popen handle for this command's Claude
+        CLI subprocess as soon as it's launched, so the caller can forcibly
+        cancel a long-running command (e.g. self_improve/hire_employee) that
+        would otherwise block until it finishes on its own. The subprocess is
+        started in its own process group/session specifically so a cancel can
+        take out its whole tree (it, the MCP server it spawns, and anything
+        that server itself spawns like self_improve's inner Claude Code call)
+        with one signal, not just the top-level process.
 
     Returns the final text to speak, or None if the brain couldn't be
     reached at all (caller should fall back to local chat-only Ollama).
@@ -153,14 +161,27 @@ def run_agent(command, on_activity=None, on_creation=None):
         "--no-session-persistence",
     ]
 
+    # New process group/session (POSIX: start_new_session; Windows: its own
+    # process group) so a cancel can reach the whole tree this spawns, not
+    # just this top-level process -- see on_process docstring above.
+    _group_kwargs = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
+        else {"start_new_session": True}
+    )
     try:
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, encoding="utf-8", errors="replace",
+            text=True, encoding="utf-8", errors="replace", **_group_kwargs,
         )
     except Exception as e:
         print(f"  [Brain] Launch error: {e}")
         return None
+
+    if on_process:
+        try:
+            on_process(proc)
+        except Exception:
+            pass
 
     killer = threading.Timer(TIMEOUT_SECS, lambda: proc.kill())
     killer.daemon = True
