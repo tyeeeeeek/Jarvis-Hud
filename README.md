@@ -384,6 +384,61 @@ Fully inert (no-op, no errors) until `JARVIS_IMPROVEMENT_BOT_TOKEN` is set.
 
 ---
 
+## Cybersecurity watchdog (JarSecurity)
+
+A fourth dedicated, send-only Telegram bot — separate from the command bot
+and the other watchdogs above — for periodic cybersecurity sweeps of this
+machine. Runs immediately on startup, then every 4 hours (see
+`_security_watcher_thread` in `jarvis.py`), and logs every run to
+`~/.jarvis/security_log.jsonl`:
+
+- **Open ports** — lists every listening TCP/UDP port (`ss -tulpn` /
+  `netstat -an`), same read-only style as `run_diagnostic_command`.
+- **Suspicious processes** — flags anything matching a curated list of
+  known cryptominer/backdoor process names, or any process executing out
+  of a world-writable temp directory (`/tmp`, `/dev/shm`, `/var/tmp` — a
+  classic dropper location). Report-only: nothing is ever killed.
+- **Network scan for intruders** — re-runs the same LAN scan
+  `scan_network` already does, flagging any brand-new device as a possible
+  intruder.
+- **uBlock Origin Lite** — verifies the ad/tracker blocker is installed in
+  the dedicated Jarvis browser window (`browser_control.py`), and installs
+  it automatically (straight from its own official GitHub releases,
+  structurally verified before ever being loaded) if it isn't. Close and
+  reopen the browser window after a fresh install for it to take effect.
+
+After **every** scheduled sweep, it sends a short summary to Telegram. If a
+sweep finds anything **critical** — a suspicious process or a new LAN
+device — it sends an alert **immediately**, rather than waiting for the
+next summary. It's send-only: it never polls for incoming messages and
+can't be used to run commands, so a leaked token can only be used to spam
+that one chat.
+
+1. Message **@BotFather** in Telegram, send `/newbot`, and follow the
+   prompts to get a new bot token (a *different* bot than the ones above,
+   so these alerts stay on their own channel).
+2. Send that new bot anything so it knows who you are.
+3. In `.env`, set:
+   ```
+   JARVIS_SECURITY_BOT_TOKEN=123456:XYZ-...   # from BotFather
+   JARVIS_SECURITY_CHAT_ID=                   # leave blank to reuse TELEGRAM_CHAT_ID
+   ```
+4. Restart Jarvis. No separate startup log line needed — it's called
+   directly from `_security_watcher_thread`.
+
+Same on-demand tools as the other watchdogs above apply here too — ask
+Jarvis to run a security check now (`run_security_check`), check whether
+uBlock is installed (`verify_ublock_origin`) or install it
+(`install_ublock_origin`), or ask for this agent's status
+(`agent_status`) / a test send (`send_agent_test_message`) any time
+rather than waiting for the next scheduled sweep.
+
+Fully inert (no-op, no errors) until `JARVIS_SECURITY_BOT_TOKEN` is set —
+the sweep itself still runs and logs locally either way, only the Telegram
+alerts are gated on that.
+
+---
+
 ## Homelab (NAS + network)
 
 Jarvis can report on your Synology NAS and your LAN — a "Homelab" HUD widget plus

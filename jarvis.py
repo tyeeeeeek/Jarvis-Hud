@@ -67,6 +67,7 @@ import sms
 import telegram_bridge
 import jarvis_cpu_alerts
 import jarvis_improvement
+import jarvis_security
 import email_watcher
 
 try:
@@ -779,6 +780,41 @@ def _network_watch_thread():
             break
 
 
+_SECURITY_CHECK_INTERVAL_SECONDS = 4 * 60 * 60  # 4 hours
+
+
+def _security_watcher_thread():
+    """Runs tools.run_security_check() immediately, then every 4 hours for
+    as long as Jarvis's backend is running -- open ports, suspicious
+    processes, a LAN scan for new/unknown devices, and uBlock Origin Lite
+    verify/install in the dedicated Jarvis browser, logged to
+    ~/.jarvis/security_log.jsonl every time.
+
+    The JarSecurity sub-agent (jarvis_security.py) rides along on the same
+    cycle: it gets a summary after every sweep, and a critical finding (a
+    suspicious process or a brand-new LAN device) triggers an immediate
+    Telegram alert from it, same as the voice/SMS/main-Telegram alert
+    below."""
+    while not pipeline_stop.is_set():
+        try:
+            result = tools.run_security_check()
+            print(f"  [Security] {result}")
+        except Exception as e:
+            print(f"  [Security] {e}")
+            result = ""
+        critical = tools.LAST_SECURITY_RESULT.get("critical", False)
+        if critical:
+            text = f"Security sweep sir: {result}"
+            with _command_lock:
+                speak(text)
+            _notify_all(text)
+            jarvis_security.send_alert(result)
+        if result:
+            jarvis_security.send_summary(result)
+        if pipeline_stop.wait(_SECURITY_CHECK_INTERVAL_SECONDS):
+            break
+
+
 _SPEEDTEST_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
 
 
@@ -934,6 +970,7 @@ def voice_loop():
     threading.Thread(target=_telegram_command_thread, daemon=True, name="Telegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
     threading.Thread(target=_network_watch_thread, daemon=True, name="NetworkWatch").start()
+    threading.Thread(target=_security_watcher_thread, daemon=True, name="Security").start()
     threading.Thread(target=_speedtest_watcher_thread, daemon=True, name="Speedtest").start()
     time.sleep(0.5)
 

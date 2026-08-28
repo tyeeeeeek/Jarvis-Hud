@@ -41,6 +41,7 @@ _TOOL_FUNCS = [
     tools.check_disk_space, tools.clean_disk, tools.check_system_health,
     tools.system_power, tools.run_diagnostic_command,
     tools.get_nas_status, tools.check_internet_speed, tools.scan_network,
+    tools.run_security_check, tools.verify_ublock_origin, tools.install_ublock_origin,
     tools.get_tailscale_status, tools.tailscale_ping, tools.set_tailscale_exit_node,
     tools.tailscale_connect, tools.tailscale_disconnect,
     tools.sync_bank_data, tools.get_spending_summary, tools.get_financial_insights,

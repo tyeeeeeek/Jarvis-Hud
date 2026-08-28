@@ -48,6 +48,7 @@ except ImportError:
 import telegram_common
 import jarvis_cpu_alerts
 import jarvis_improvement
+import jarvis_security
 
 try:
     import browser_control; BROWSER_CONTROL_AVAILABLE = True
@@ -1001,6 +1002,207 @@ def scan_network() -> str:
     return f"{len(result['devices'])} devices on your network sir, nothing new."
 
 
+# ================================================================ SECURITY (JarSecurity)
+SECURITY_LOG_PATH = os.path.join(JARVIS_DIR, "security_log.jsonl")
+
+# Curated, named substrings of real-world Linux cryptominer/backdoor process
+# names (XMRig family, Kinsing, perfctl, ...) -- a heuristic, not exhaustive,
+# but enough to catch the loud, common cases without a generic "flag
+# anything that looks weird" rule that would just be noisy false positives.
+_SUSPICIOUS_PROCESS_NAMES = (
+    "xmrig", "kinsing", "kdevtmpfsi", "kthreaddi", "kthreaddk", "minerd",
+    "moneroocean", "perfctl", "ddgs", "cryptonight", "sysrv", "diicot", "skidmap",
+)
+# Directories a legitimate long-running process should never be executing
+# out of -- classic dropper/persistence locations for malware that writes
+# itself somewhere world-writable and self-launches.
+_SUSPICIOUS_EXEC_DIRS = ("/tmp/", "/dev/shm/", "/var/tmp/")
+
+# Structured result of the most recent run_security_check() call -- lets
+# callers (e.g. jarvis.py's security-watcher thread) branch on whether it
+# was critical without re-parsing the human-readable reply string.
+LAST_SECURITY_RESULT = {}
+
+
+def _log_security_event(entry):
+    _ensure_jarvis_dir()
+    entry = dict(entry, ts=time.time())
+    try:
+        with open(SECURITY_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def _list_processes_linux():
+    """[(pid, comm, exe_path_or_none)] read straight from /proc -- no extra
+    dependency needed, same read-only style as _read_linux_temps()."""
+    procs = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", "r", encoding="utf-8", errors="replace") as f:
+                comm = f.read().strip()
+        except Exception:
+            continue
+        try:
+            exe = os.readlink(f"/proc/{entry}/exe")
+        except Exception:
+            exe = None
+        procs.append((entry, comm, exe))
+    return procs
+
+
+def _find_suspicious_processes():
+    """Flag any running process matching the curated cryptominer/backdoor
+    name list, or executing out of a world-writable temp directory. Never
+    kills or touches anything -- report-only, same as the rest of
+    run_security_check()."""
+    if IS_WINDOWS:
+        entry = _DIAGNOSTIC_COMMANDS_WIN["processes"]
+        try:
+            out = subprocess.run(entry[0], capture_output=True, text=True, timeout=15).stdout
+        except Exception:
+            out = ""
+        return [line.strip() for line in out.splitlines()
+                if any(name in line.lower() for name in _SUSPICIOUS_PROCESS_NAMES)]
+    hits = []
+    for pid, comm, exe in _list_processes_linux():
+        lname = comm.lower()
+        if any(name in lname for name in _SUSPICIOUS_PROCESS_NAMES):
+            hits.append(f"{comm} (pid {pid})")
+        elif exe and any(exe.startswith(d) for d in _SUSPICIOUS_EXEC_DIRS):
+            hits.append(f"{comm} (pid {pid}) running from {exe}")
+    return hits
+
+
+def _open_listening_ports():
+    """Parsed list of unique local address:port entries currently
+    LISTENing, via the same read-only diagnostic commands
+    run_diagnostic_command already exposes (ss -tulpn / netstat -an) --
+    report-only, never touches or closes anything."""
+    entry = _DIAGNOSTIC_COMMANDS.get("listening_ports")
+    if not entry:
+        return []
+    try:
+        out = subprocess.run(entry[0], capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return []
+    ports, seen = [], set()
+    for line in out.splitlines():
+        parts = line.split()
+        if IS_WINDOWS:
+            if len(parts) >= 4 and parts[0] in ("TCP", "UDP") and "LISTENING" in line.upper():
+                addr = parts[1]
+            else:
+                continue
+        else:
+            if len(parts) >= 5 and parts[1] == "LISTEN":
+                addr = parts[4]
+            else:
+                continue
+        if addr not in seen:
+            seen.add(addr)
+            ports.append(addr)
+    return ports
+
+
+def run_security_check() -> str:
+    """JarSecurity sub-agent's core sweep: lists listening TCP/UDP ports,
+    flags any running process matching a curated list of known
+    cryptominer/backdoor names or executing out of a world-writable temp
+    directory, re-runs the same LAN scan scan_network() already does
+    (flagging brand-new devices as possible intruders), and verifies --
+    installing if missing -- uBlock Origin Lite in the dedicated Jarvis
+    browser window. Every run is logged to ~/.jarvis/security_log.jsonl.
+    Safe to call anytime on demand; also runs automatically in the
+    background on a fixed schedule."""
+    global LAST_SECURITY_RESULT
+    ports = _open_listening_ports()
+    suspicious = _find_suspicious_processes()
+
+    net = network_watch.scan()
+    net_error = net.get("error", "")
+    new_count = net.get("new_count", 0) if not net_error else 0
+    device_count = len(net.get("devices", [])) if not net_error else 0
+
+    ublock_ok = False
+    ublock_note = "unavailable -- browser control module isn't available"
+    if BROWSER_CONTROL_AVAILABLE:
+        status = browser_control.verify_ublock_origin()
+        if status.get("installed"):
+            ublock_ok = True
+            ublock_note = "verified"
+        else:
+            installed = browser_control.install_ublock_origin()
+            ublock_ok = bool(installed.get("ok"))
+            if ublock_ok:
+                ublock_note = "installed just now"
+            else:
+                ublock_note = f"install failed ({installed.get('error', 'unknown error')})"
+
+    critical = bool(suspicious) or new_count > 0
+
+    summary_parts = [f"{len(ports)} listening port{'s' if len(ports) != 1 else ''}"]
+    if suspicious:
+        summary_parts.append(
+            f"{len(suspicious)} suspicious process{'es' if len(suspicious) != 1 else ''} flagged: "
+            + "; ".join(suspicious)
+        )
+    else:
+        summary_parts.append("no suspicious processes")
+    if net_error:
+        summary_parts.append(f"network scan unavailable ({net_error})")
+    elif new_count:
+        summary_parts.append(f"{new_count} new device{'s' if new_count != 1 else ''} on the LAN")
+    else:
+        summary_parts.append(f"{device_count} known devices on the LAN, nothing new")
+    summary_parts.append(f"uBlock Origin Lite {ublock_note}")
+    result_text = "; ".join(summary_parts) + "."
+
+    LAST_SECURITY_RESULT = {
+        "critical": critical, "open_ports": len(ports), "suspicious": suspicious,
+        "new_devices": new_count, "ublock_ok": ublock_ok,
+    }
+    _log_security_event({
+        "open_ports": len(ports), "suspicious": suspicious, "new_devices": new_count,
+        "ublock_ok": ublock_ok, "critical": critical,
+    })
+    return result_text
+
+
+def verify_ublock_origin() -> str:
+    """Read-only check: is uBlock Origin Lite (ad/tracker blocker) already
+    installed and verified in the dedicated Jarvis browser window? Never
+    downloads anything itself -- use install_ublock_origin for that. Use
+    this whenever the user asks whether uBlock/an ad blocker is set up in
+    the Jarvis browser."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return "The browser control module isn't available sir, so I can't check that."
+    status = browser_control.verify_ublock_origin()
+    if status.get("installed"):
+        return "uBlock Origin Lite is installed and verified in your browser sir."
+    return "uBlock Origin Lite isn't installed in your browser yet sir -- say \"install ublock\" and I'll fetch it."
+
+
+def install_ublock_origin() -> str:
+    """Download the latest official uBlock Origin Lite release straight
+    from its own GitHub repo and install it (unpacked) into the dedicated
+    Jarvis browser window -- a no-op if a verified copy is already there.
+    Use this whenever the user asks to install/set up an ad blocker in the
+    Jarvis browser. Close and reopen the browser window afterward for a
+    freshly installed extension to actually load."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return "The browser control module isn't available sir, so I can't install that."
+    result = browser_control.install_ublock_origin()
+    if not result.get("ok"):
+        return f"I couldn't install uBlock Origin Lite sir: {result.get('error', 'unknown error')}."
+    if result.get("already_installed"):
+        return "uBlock Origin Lite is already installed and verified sir."
+    return "uBlock Origin Lite installed and verified sir -- close and reopen the browser window for it to take effect."
+
+
 # ================================================================ TAILSCALE
 def get_tailscale_status() -> str:
     """Report the full tailnet picture -- this machine's own Tailscale IP
@@ -1633,6 +1835,8 @@ _AGENT_ALIASES = {
     "watchdog": "JarvisCPU_Alerts", "jarviscpu_alerts": "JarvisCPU_Alerts",
     "improvement": "JarvisImprovement", "self_improvement": "JarvisImprovement",
     "self improve": "JarvisImprovement", "jarvisimprovement": "JarvisImprovement",
+    "security": "JarSecurity", "jarsecurity": "JarSecurity", "cybersecurity": "JarSecurity",
+    "security_check": "JarSecurity",
 }
 
 
@@ -1643,6 +1847,8 @@ def _resolve_agent(agent: str):
         return name, jarvis_cpu_alerts
     if name == "JarvisImprovement":
         return name, jarvis_improvement
+    if name == "JarSecurity":
+        return name, jarvis_security
     return None, None
 
 
@@ -1688,18 +1894,20 @@ def _fmt_ago(ts):
 
 
 def agent_status() -> str:
-    """Report whether the JarvisCPU_Alerts (PC health watchdog) and
-    JarvisImprovement (daily self-improvement) Telegram sub-agents are
-    configured, and when each last actually delivered a message (from the
-    shared confirmed-delivery log), plus the most recent health check
-    result on file. Use this whenever the user asks how the watchdog/CPU
-    alerts or self-improvement agent is doing, whether it's still running,
-    or when it last sent something."""
+    """Report whether the JarvisCPU_Alerts (PC health watchdog),
+    JarvisImprovement (daily self-improvement), and JarSecurity
+    (cybersecurity watchdog) Telegram sub-agents are configured, and when
+    each last actually delivered a message (from the shared
+    confirmed-delivery log), plus the most recent health check and security
+    sweep results on file. Use this whenever the user asks how the
+    watchdog/CPU alerts, self-improvement, or security agent is doing,
+    whether it's still running, or when it last sent something."""
     lines = []
 
     for label, name, mod in (
         ("JarvisCPU_Alerts (PC health watchdog)", "JarvisCPU_Alerts", jarvis_cpu_alerts),
         ("JarvisImprovement (daily self-improvement)", "JarvisImprovement", jarvis_improvement),
+        ("JarSecurity (cybersecurity watchdog)", "JarSecurity", jarvis_security),
     ):
         if not mod.AVAILABLE:
             lines.append(f"{label}: not configured -- missing bot token or chat ID.")
@@ -1721,6 +1929,15 @@ def agent_status() -> str:
             f"{free_gb:.1f} GB free, critical={h.get('critical', False)}."
         )
 
+    security_entries = _read_jsonl_tail(SECURITY_LOG_PATH, max_lines=1)
+    if security_entries:
+        s = security_entries[-1]
+        lines.append(
+            f"Last security sweep ({_fmt_ago(s['ts'])}): {s.get('open_ports', 0)} open ports, "
+            f"{len(s.get('suspicious', []))} suspicious processes, "
+            f"{s.get('new_devices', 0)} new LAN devices, critical={s.get('critical', False)}."
+        )
+
     return "Agent status sir:\n" + "\n".join(lines)
 
 
@@ -1730,8 +1947,9 @@ def send_agent_test_message(agent: str) -> str:
     use this whenever the user asks to test, ping, or verify the CPU
     alerts/watchdog or self-improvement Telegram bot. `agent` must identify
     which one: e.g. "cpu_alerts"/"watchdog"/"health" for JarvisCPU_Alerts,
-    or "improvement"/"self_improvement" for JarvisImprovement. Returns
-    whether Telegram confirmed the send."""
+    "improvement"/"self_improvement" for JarvisImprovement, or
+    "security"/"jarsecurity" for JarSecurity. Returns whether Telegram
+    confirmed the send."""
     name, mod = _resolve_agent(agent)
     if not name:
         return json.dumps({"ok": False, "message": f"I don't recognize the agent \"{agent}\" sir -- try \"cpu alerts\" or \"improvement\"."})

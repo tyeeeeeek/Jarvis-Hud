@@ -22,10 +22,16 @@
 # ================================================================
 import os
 import re
+import json
+import shutil
 import queue
+import tempfile
+import zipfile
 import threading
 import urllib.parse
 import concurrent.futures
+
+import requests
 
 HOME = os.path.expanduser("~")
 PROFILE_DIR = os.path.join(HOME, ".jarvis-browser-profile")
@@ -59,6 +65,96 @@ _CHROMIUM_ARGS = [
     "--disable-dev-shm-usage",
     "--disk-cache-size=104857600",
 ]
+
+# ---- uBlock Origin Lite (JarSecurity) ---------------------------------
+# A dedicated folder under the user's home directory, entirely separate
+# from tools.py's _SAFE_DIRS file-management jail -- nothing else reads or
+# writes here except the two functions below. Playwright's persistent
+# Chromium context can only load an *unpacked* MV3 extension via
+# --load-extension (there's no Web-Store-install API for an automated
+# profile), so the official open-source release is fetched straight from
+# its own GitHub repo (uBlockOrigin/uBOL-home -- the same project
+# distributed on the Chrome Web Store) and unpacked here.
+_EXTENSIONS_DIR = os.path.join(HOME, ".jarvis-browser-extensions")
+_UBLOCK_DIR = os.path.join(_EXTENSIONS_DIR, "ublock-origin-lite")
+_UBLOCK_RELEASES_API = "https://api.github.com/repos/uBlockOrigin/uBOL-home/releases/latest"
+
+
+def _ublock_manifest_ok(ext_dir):
+    """True only if ext_dir holds a real, structurally-verified uBlock
+    Origin Lite (MV3) unpacked extension -- checked by manifest_version==3
+    plus the English display name from its own locale file, not just "a
+    file exists", so a half-written or unrelated directory is never
+    trusted (and never silently loaded into the browser)."""
+    try:
+        with open(os.path.join(ext_dir, "manifest.json"), "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if manifest.get("manifest_version") != 3:
+            return False
+        with open(os.path.join(ext_dir, "_locales", "en", "messages.json"), "r", encoding="utf-8") as f:
+            messages = json.load(f)
+        return messages.get("extName", {}).get("message") == "uBlock Origin Lite"
+    except Exception:
+        return False
+
+
+def verify_ublock_origin() -> dict:
+    """Read-only check: is a valid, verified uBlock Origin Lite already
+    unpacked at _UBLOCK_DIR (and so already wired into the next browser
+    launch's args, see _chromium_args below)? Never downloads anything --
+    see install_ublock_origin() for that."""
+    return {"installed": _ublock_manifest_ok(_UBLOCK_DIR), "path": _UBLOCK_DIR}
+
+
+def install_ublock_origin() -> dict:
+    """Download the latest official uBlock Origin Lite (MV3) release and
+    unpack it into _UBLOCK_DIR. A no-op if a verified copy is already
+    there. The result is verified structurally (same check as
+    verify_ublock_origin) before it's ever moved into place, and the
+    download is extracted into a throwaway temp directory first so a
+    corrupt/partial download can never leave a half-written extension
+    directory behind. A later browser (re)launch (see _launch_context)
+    picks it up automatically -- an already-open browser window must be
+    closed and reopened for a freshly installed extension to load."""
+    if _ublock_manifest_ok(_UBLOCK_DIR):
+        return {"ok": True, "already_installed": True, "path": _UBLOCK_DIR}
+    try:
+        r = requests.get(_UBLOCK_RELEASES_API, timeout=20)
+        r.raise_for_status()
+        assets = r.json().get("assets", [])
+        asset = next((a for a in assets if a.get("name", "").endswith(".chromium.zip")), None)
+        if not asset:
+            return {"ok": False, "error": "couldn't find a chromium release asset on GitHub"}
+        zr = requests.get(asset["browser_download_url"], timeout=60)
+        zr.raise_for_status()
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, "ubol.zip")
+            with open(zip_path, "wb") as f:
+                f.write(zr.content)
+            extract_dir = os.path.join(tmp, "extracted")
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(extract_dir)
+            if not _ublock_manifest_ok(extract_dir):
+                return {"ok": False, "error": "downloaded extension failed verification"}
+            os.makedirs(_EXTENSIONS_DIR, exist_ok=True)
+            if os.path.isdir(_UBLOCK_DIR):
+                shutil.rmtree(_UBLOCK_DIR, ignore_errors=True)
+            shutil.move(extract_dir, _UBLOCK_DIR)
+        return {"ok": True, "already_installed": False, "path": _UBLOCK_DIR}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _chromium_args():
+    """Base Chromium args, plus --load-extension for uBlock Origin Lite
+    when (and only when) a verified copy is on disk -- re-checked on every
+    launch so a manually deleted/corrupted extension directory just falls
+    back to no extension instead of a broken launch."""
+    args = list(_CHROMIUM_ARGS)
+    if _ublock_manifest_ok(_UBLOCK_DIR):
+        args += [f"--disable-extensions-except={_UBLOCK_DIR}", f"--load-extension={_UBLOCK_DIR}"]
+    return args
+
 
 _state_lock = threading.Lock()
 _current_queue = None
@@ -165,7 +261,7 @@ def _launch_context(p, profile_dir, active):
     os.makedirs(profile_dir, exist_ok=True)
     _clear_stale_singleton_files(profile_dir)
     context = p.chromium.launch_persistent_context(
-        profile_dir, headless=False, args=_CHROMIUM_ARGS,
+        profile_dir, headless=False, args=_chromium_args(),
     )
     _watch_context_for_stray_pages(context, active)
     page = context.pages[0] if context.pages else context.new_page()
