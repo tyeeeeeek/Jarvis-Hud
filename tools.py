@@ -2216,6 +2216,40 @@ def send_agent_test_message(agent: str) -> str:
     return json.dumps({"ok": ok, "agent": name, "message": message})
 
 
+def security_status_report() -> str:
+    """Read-only summary of JarSecurity's recent activity: the last few
+    logged sweeps from ~/.jarvis/security_log.jsonl (open ports, suspicious
+    processes, new LAN devices, firmware/driver and browser-extension
+    findings) plus the last confirmed JarSecurity Telegram delivery. Never
+    triggers a fresh run_security_check() itself, so it replies immediately
+    rather than waiting on a network/browser sweep. Called by
+    jarvis_security.py's poll_thread() when the user texts JarSecurity's own
+    bot directly, asking what it's been finding lately. Not exposed to the
+    brain as a voice/text-command tool -- agent_status() already covers that
+    combined, cross-agent view; this one is specific to JarSecurity's own
+    two-way channel."""
+    entries = _read_jsonl_tail(SECURITY_LOG_PATH, max_lines=5)
+    if not entries:
+        lines = ["No sweeps logged yet sir -- the first one runs shortly after startup."]
+    else:
+        lines = [f"Last {len(entries)} sweep{'s' if len(entries) != 1 else ''}:"]
+        for e in reversed(entries):
+            state = "CRITICAL" if e.get("critical") else "clear"
+            lines.append(
+                f"- {_fmt_ago(e['ts'])}: {state} -- {e.get('open_ports', 0)} open ports, "
+                f"{len(e.get('suspicious', []))} suspicious process(es), "
+                f"{e.get('new_devices', 0)} new device(s), "
+                f"firmware flagged={e.get('firmware_flagged', False)}, "
+                f"uBlock={'ok' if e.get('ublock_ok') else 'issue'}, "
+                f"DuckDuckGo={'ok' if e.get('ddg_ok') else 'issue'}"
+            )
+    last = _last_delivery_for("JarSecurity")
+    if last:
+        preview = last.get("preview", "").replace("\n", " ")
+        lines.append(f"Last job sent {_fmt_ago(last['ts'])}: \"{preview}\"")
+    return "JarSecurity status sir:\n" + "\n".join(lines)
+
+
 # ================================================================ MANAGER / EMPLOYEES
 # Jarvis-as-manager framing over the narrow capabilities already defined
 # above -- "hiring an employee" never grants any new capability, it just

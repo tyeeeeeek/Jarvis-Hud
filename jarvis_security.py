@@ -19,9 +19,15 @@
 #   a brand-new device on the LAN) instead of waiting for the next
 #   scheduled summary.
 #
-#   Never polls for incoming messages or accepts commands -- a leaked
-#   token can only be used to spam this one chat, never to control
-#   anything on the PC.
+#   Two-way for exactly one thing: any incoming text message from the
+#   authorized chat triggers an immediate reply summarizing recent security
+#   events, sweeps, and jobs this bot has been running -- see poll_thread().
+#   That reply is read-only, built from the on-disk sweep log and the
+#   shared delivery log, never a fresh sweep itself (a full sweep touches
+#   the network and the browser and can take a while; it still runs on its
+#   own 4-hour schedule). It still never accepts commands or forwards text
+#   anywhere else, so a leaked token can only be used to ask "what have you
+#   found lately", never to control anything.
 #
 #   Fully inert until JARVIS_SECURITY_BOT_TOKEN is set in .env; reuses
 #   TELEGRAM_CHAT_ID (same user, same phone) unless
@@ -73,3 +79,25 @@ def send_test_message() -> bool:
     agent, so it also shows up in agent_status()."""
     return _send("JARSECURITY TEST — this is a manual test message, sir. If you're reading this, "
                   "the JarSecurity Telegram pipeline is working.")
+
+
+def poll_thread(pipeline_stop) -> None:
+    """This bot's two-way half: long-polls its own token/chat (isolated from
+    every other bot's inbox) and, on any incoming text message, replies
+    with tools.security_status_report() -- a read-only summary of recent
+    sweeps and jobs pulled from ~/.jarvis/security_log.jsonl and the shared
+    delivery log. Deliberately doesn't trigger a fresh run_security_check()
+    itself (that sweep touches the network and the browser and can take a
+    while); it just reports what the scheduled 4-hour sweep has already
+    found, so the reply is fast. tools is imported locally, not at module
+    load time, because tools.py imports this module -- importing it back up
+    top would be a circular import."""
+    def on_message(_text):
+        import tools
+        try:
+            report = tools.security_status_report()
+        except Exception as e:
+            _send(f"Couldn't pull a security status report sir: {e}")
+            return
+        _send(report)
+    telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)

@@ -12,9 +12,11 @@
 #   check_system_health() flags overheating risk or critically low disk
 #   space, rather than waiting for the next scheduled summary.
 #
-#   Never polls for incoming messages or accepts commands -- a leaked
-#   token can only be used to spam this one chat, never to control
-#   anything on the PC.
+#   Two-way for exactly one thing: any incoming text message from the
+#   authorized chat triggers an immediate, on-demand check_system_health()
+#   run and a reply with the result -- see poll_thread(). It still never
+#   accepts commands or forwards text anywhere else, so a leaked token can
+#   only be used to ask "how's the PC doing", never to control anything.
 #
 #   Fully inert until JARVIS_CPU_ALERTS_BOT_TOKEN is set in .env; reuses
 #   TELEGRAM_CHAT_ID (same user, same phone) unless
@@ -65,3 +67,24 @@ def send_test_message() -> bool:
     send from this agent, so it also shows up in agent_status()."""
     return _send("WATCHDOG TEST — this is a manual test message, sir. If you're reading this, "
                   "the JarvisCPU_Alerts Telegram pipeline is working.")
+
+
+def poll_thread(pipeline_stop) -> None:
+    """This bot's two-way half: long-polls its own token/chat (isolated from
+    every other bot's inbox) and, on any incoming text message, runs a fresh
+    check_system_health() and replies with the result -- an on-demand PC
+    health/status update without waiting for the next scheduled 2-hour
+    check. tools is imported locally (not at module load time) because
+    tools.py imports this module itself; importing it up top would be a
+    circular import. check_system_health() is a fast, read-only-except-for-
+    routine-cleanup call (sensors + disk usage), so it's run right here on
+    the poll thread rather than spun off in the background."""
+    def on_message(_text):
+        import tools
+        try:
+            result = tools.check_system_health()
+        except Exception as e:
+            _send(f"Couldn't run a health check sir: {e}")
+            return
+        _send(f"WATCHDOG ON-DEMAND CHECK — {result}")
+    telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)

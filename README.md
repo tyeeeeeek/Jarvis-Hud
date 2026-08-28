@@ -187,7 +187,7 @@ venv\Scripts\python.exe jarvis.py
 ├── browser_control.py        # Dedicated Playwright browser worker (YouTube playback)
 ├── sms.py                    # Twilio SMS bridge — text Jarvis, it texts back
 ├── telegram_bridge.py        # Free Telegram bridge — same idea, no Twilio needed
-├── jarvis_cpu_alerts.py      # JarvisCPU_Alerts — dedicated send-only bot for PC health alerts
+├── jarvis_cpu_alerts.py      # JarvisCPU_Alerts — dedicated bot for PC health alerts (two-way: texts back an on-demand check)
 ├── email_watcher.py          # Gmail polling + importance triage (bills, offers, deliveries)
 ├── self_improve.md           # Instructions + hard guardrails for the nightly agent
 ├── run_self_improve.ps1      # Wrapper the JarvisSelfImprove scheduled task runs
@@ -325,8 +325,11 @@ rides along on the existing 2-hour `check_system_health()` background check
   recycle bin — it sends an alert **immediately**, rather than waiting for
   the next summary.
 
-It's send-only: it never polls for incoming messages and can't be used to run
-commands, so a leaked token can only be used to spam that one chat.
+It's two-way for exactly one thing: text this bot anything and it replies
+with a fresh, on-demand `check_system_health()` result right away, instead
+of waiting for the next scheduled check. It still never accepts commands or
+forwards text anywhere else — a leaked token can only be used to ask "how's
+the PC doing", never to control anything.
 
 1. Message **@BotFather** in Telegram, send `/newbot`, and follow the prompts
    to get a new bot token (a *different* bot than the one used for texting
@@ -362,8 +365,13 @@ sends exactly one message a day, right after that pass finishes:
 - Or "nothing safe to improve found today" if the pass ran and genuinely
   found nothing worth doing.
 
-It's send-only: it never polls for incoming messages or accepts commands, so
-a leaked token can only be used to spam that one chat.
+It's two-way for exactly one thing: text this bot anything and it's treated
+as an on-demand self-improvement request — identical to asking Jarvis
+directly "improve on ..." — run through the same `self_improve()` (same
+hard constraints, same syntax-check/build-verify gate before any commit).
+It acks immediately, then reports back once the run finishes (which can
+take a few minutes). A leaked token could waste a run, but can never run an
+arbitrary command or step outside `self_improve()`'s own constraints.
 
 1. Message **@BotFather** in Telegram, send `/newbot`, and follow the prompts
    to get a new bot token (a *different* bot than the ones used above, so
@@ -410,9 +418,14 @@ machine. Runs immediately on startup, then every 4 hours (see
 After **every** scheduled sweep, it sends a short summary to Telegram. If a
 sweep finds anything **critical** — a suspicious process or a new LAN
 device — it sends an alert **immediately**, rather than waiting for the
-next summary. It's send-only: it never polls for incoming messages and
-can't be used to run commands, so a leaked token can only be used to spam
-that one chat.
+next summary. It's two-way for exactly one thing: text this bot anything
+and it replies with a read-only status update on recent sweeps and jobs
+(from `~/.jarvis/security_log.jsonl` and the shared delivery log) —
+deliberately not a fresh sweep itself, since a full sweep touches the
+network and the browser and can take a while, so this reply is instant. It
+still never accepts commands or forwards text anywhere else, so a leaked
+token can only be used to ask "what have you found lately", never to
+control anything.
 
 1. Message **@BotFather** in Telegram, send `/newbot`, and follow the
    prompts to get a new bot token (a *different* bot than the ones above,

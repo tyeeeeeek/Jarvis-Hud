@@ -858,6 +858,27 @@ def _telegram_command_thread():
     telegram_bridge.poll_thread(on_command, pipeline_stop)
 
 
+def _cpu_alerts_command_thread():
+    """JarvisCPU_Alerts's own two-way channel: any incoming message on its
+    bot gets an immediate on-demand health check back. See
+    jarvis_cpu_alerts.poll_thread()."""
+    jarvis_cpu_alerts.poll_thread(pipeline_stop)
+
+
+def _improvement_command_thread():
+    """JarvisImprovement's own two-way channel: any incoming message on its
+    bot is treated as an on-demand self-improvement request. See
+    jarvis_improvement.poll_thread()."""
+    jarvis_improvement.poll_thread(pipeline_stop)
+
+
+def _security_command_thread():
+    """JarSecurity's own two-way channel: any incoming message on its bot
+    gets an immediate recent-activity status report back. See
+    jarvis_security.poll_thread()."""
+    jarvis_security.poll_thread(pipeline_stop)
+
+
 def _email_watch_thread():
     email_watcher.poll_thread(_on_important_email, pipeline_stop)
 
@@ -976,6 +997,9 @@ def voice_loop():
     threading.Thread(target=_network_watch_thread, daemon=True, name="NetworkWatch").start()
     threading.Thread(target=_security_watcher_thread, daemon=True, name="Security").start()
     threading.Thread(target=_speedtest_watcher_thread, daemon=True, name="Speedtest").start()
+    threading.Thread(target=_cpu_alerts_command_thread, daemon=True, name="CPUAlertsTelegram").start()
+    threading.Thread(target=_improvement_command_thread, daemon=True, name="ImprovementTelegram").start()
+    threading.Thread(target=_security_command_thread, daemon=True, name="SecurityTelegram").start()
     time.sleep(0.5)
 
     set_status("Idle")

@@ -16,15 +16,21 @@
 #   pass completes -- whether it made changes, found nothing safe to
 #   improve, or hit the time-box.
 #
-#   Never polls for incoming messages or accepts commands -- a leaked
-#   token can only be used to spam this one chat, never to control
-#   anything on the PC.
+#   Two-way for exactly one thing: any incoming text message from the
+#   authorized chat is treated as an on-demand self-improvement request --
+#   identical to the user asking Jarvis directly "improve on ..." -- and run
+#   through the same tools.self_improve() (same hard constraints, same
+#   syntax-check/build-verify gate before any commit) rather than any free-
+#   form command. See poll_thread(). A leaked token could waste a self-
+#   improve run, but can never run an arbitrary command or touch anything
+#   outside self_improve()'s own constraints.
 #
 #   Fully inert until JARVIS_IMPROVEMENT_BOT_TOKEN is set in .env; reuses
 #   TELEGRAM_CHAT_ID (same user, same phone) unless
 #   JARVIS_IMPROVEMENT_CHAT_ID overrides it.
 # ================================================================
 import os
+import threading
 
 import telegram_common
 
@@ -95,3 +101,32 @@ def send_test_message() -> bool:
     send from this agent, so it also shows up in agent_status()."""
     return _send("This is a manual test message, sir -- if you're reading this, "
                   "the JarvisImprovement Telegram pipeline is working.")
+
+
+def poll_thread(pipeline_stop) -> None:
+    """This bot's two-way half: long-polls its own token/chat (isolated from
+    every other bot's inbox) and treats any incoming text message as an
+    on-demand self-improvement request, run through tools.self_improve() --
+    the exact same mechanism, constraints, and build-verify gate as the
+    "Jarvis, improve on ..." voice/text command. self_improve() can take
+    several minutes (it shells out to Claude Code), so it's handed off to a
+    background thread rather than run on the poll loop itself, which would
+    otherwise sit unable to notice a stop signal or a second incoming
+    message until the run finished; an immediate ack goes out first so the
+    user knows it was received. self_improve() already sends its own
+    JarvisImprovement report (via tools._report_ondemand_improve) once the
+    run completes, so nothing further needs to be sent from here. tools is
+    imported locally, not at module load time, because tools.py imports
+    this module -- importing it back up top would be a circular import."""
+    def _run(focus):
+        import tools
+        try:
+            tools.self_improve(focus)
+        except Exception as e:
+            print(f"  [JarvisImprovement] on-demand run failed: {e}")
+
+    def on_message(text):
+        _send(f"On it sir -- looking into \"{text.strip()}\" now. I'll report back when it's done.")
+        threading.Thread(target=_run, args=(text,), daemon=True).start()
+
+    telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)
