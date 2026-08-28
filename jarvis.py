@@ -645,8 +645,12 @@ def _on_brain_creation(payload):
         "kind": payload.get("kind", "dashboard"),
         "html": html,
     })
-    if payload.get("kind") == "webpage":
-        _open_in_browser("file:///" + path.replace("\\", "/"))
+    # Both kinds pop straight into Brave, front-and-center, the moment
+    # they're ready -- like a Claude artifact appearing -- in addition to
+    # the in-HUD panel above; a dashboard still ALSO shows in the HUD panel
+    # since that's where a HUD-styled widget belongs, it just no longer
+    # requires the user to notice and click "open in browser" manually.
+    _open_in_browser("file:///" + path.replace("\\", "/"))
 
 
 _BRAVE_BIN = shutil.which("brave") or shutil.which("brave-browser")

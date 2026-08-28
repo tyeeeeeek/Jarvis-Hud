@@ -1833,11 +1833,15 @@ def _slugify(text):
 
 def build_creation(description: str, kind: str = "dashboard") -> str:
     """Build something and show it to the user -- a single self-contained
-    HTML page. kind="dashboard" for something meant to appear right inside
-    the HUD (a widget, a visualization, a small tool) -- style it dark/glass/
-    cyan monospace to match the HUD. kind="webpage" for a full site meant to
-    open in the real browser instead. This can take up to several minutes for
-    anything nontrivial; the user will see a live indicator while it builds."""
+    HTML page. kind="dashboard" for something styled to match the HUD (a
+    widget, a visualization, a small tool) -- dark/glass/cyan monospace.
+    kind="webpage" for a full site with clean, modern, professional styling
+    instead. Either way, the moment it's ready it pops into the HUD's own
+    creation panel AND is opened front-and-center in the user's real browser
+    (Brave if installed) -- like a Claude artifact appearing, not something
+    built silently in the background. This can take up to several minutes
+    for anything nontrivial; the user will see a live indicator while it
+    builds."""
     if not os.path.exists(CLAUDE_CLI):
         return json.dumps({"ok": False, "message": "I can't find Claude Code on this system sir."})
 
