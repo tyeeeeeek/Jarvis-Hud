@@ -66,18 +66,24 @@ _CHROMIUM_ARGS = [
     "--disk-cache-size=104857600",
 ]
 
-# ---- uBlock Origin Lite (JarSecurity) ---------------------------------
+# ---- Vetted security/privacy extensions (JarSecurity) -----------------
 # A dedicated folder under the user's home directory, entirely separate
 # from tools.py's _SAFE_DIRS file-management jail -- nothing else reads or
-# writes here except the two functions below. Playwright's persistent
+# writes here except the functions below. Playwright's persistent
 # Chromium context can only load an *unpacked* MV3 extension via
 # --load-extension (there's no Web-Store-install API for an automated
-# profile), so the official open-source release is fetched straight from
-# its own GitHub repo (uBlockOrigin/uBOL-home -- the same project
-# distributed on the Chrome Web Store) and unpacked here.
+# profile), so each extension below is the official open-source release
+# fetched straight from its own GitHub repo (the same project distributed
+# on the Chrome Web Store) and unpacked here. JarSecurity's scheduled sweep
+# (tools.run_security_check) verifies/installs every extension in this
+# section the same way -- this is deliberately still a short, curated list
+# of specific named extensions, never a generic "install this extension ID"
+# tool.
 _EXTENSIONS_DIR = os.path.join(HOME, ".jarvis-browser-extensions")
 _UBLOCK_DIR = os.path.join(_EXTENSIONS_DIR, "ublock-origin-lite")
 _UBLOCK_RELEASES_API = "https://api.github.com/repos/uBlockOrigin/uBOL-home/releases/latest"
+_DDG_DIR = os.path.join(_EXTENSIONS_DIR, "duckduckgo-privacy-essentials")
+_DDG_RELEASES_API = "https://api.github.com/repos/duckduckgo/duckduckgo-privacy-extension/releases/latest"
 
 
 def _ublock_manifest_ok(ext_dir):
@@ -145,14 +151,77 @@ def install_ublock_origin() -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _ddg_manifest_ok(ext_dir):
+    """Same structural-verification idea as _ublock_manifest_ok, adapted to
+    DuckDuckGo Privacy Essentials' manifest/locale shape -- MV3 plus the
+    English display name starting with "DuckDuckGo", so nothing else is ever
+    trusted or loaded into the browser."""
+    try:
+        with open(os.path.join(ext_dir, "manifest.json"), "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if manifest.get("manifest_version") != 3:
+            return False
+        with open(os.path.join(ext_dir, "_locales", "en", "messages.json"), "r", encoding="utf-8") as f:
+            messages = json.load(f)
+        return messages.get("appName", {}).get("message", "").startswith("DuckDuckGo")
+    except Exception:
+        return False
+
+
+def verify_duckduckgo_privacy() -> dict:
+    """Read-only check: is a valid, verified DuckDuckGo Privacy Essentials
+    already unpacked at _DDG_DIR? Never downloads anything -- see
+    install_duckduckgo_privacy() for that."""
+    return {"installed": _ddg_manifest_ok(_DDG_DIR), "path": _DDG_DIR}
+
+
+def install_duckduckgo_privacy() -> dict:
+    """Download the latest official DuckDuckGo Privacy Essentials (MV3,
+    tracker blocking + HTTPS upgrade + Fire button) release and unpack it
+    into _DDG_DIR -- same verified-in-a-throwaway-temp-dir-first approach as
+    install_ublock_origin(). A no-op if a verified copy is already there."""
+    if _ddg_manifest_ok(_DDG_DIR):
+        return {"ok": True, "already_installed": True, "path": _DDG_DIR}
+    try:
+        r = requests.get(_DDG_RELEASES_API, timeout=20)
+        r.raise_for_status()
+        assets = r.json().get("assets", [])
+        asset = next((a for a in assets if a.get("name", "").startswith("chrome-release")
+                      and a.get("name", "").endswith(".zip")), None)
+        if not asset:
+            return {"ok": False, "error": "couldn't find a chrome release asset on GitHub"}
+        zr = requests.get(asset["browser_download_url"], timeout=60)
+        zr.raise_for_status()
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, "ddg.zip")
+            with open(zip_path, "wb") as f:
+                f.write(zr.content)
+            extract_dir = os.path.join(tmp, "extracted")
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(extract_dir)
+            if not _ddg_manifest_ok(extract_dir):
+                return {"ok": False, "error": "downloaded extension failed verification"}
+            os.makedirs(_EXTENSIONS_DIR, exist_ok=True)
+            if os.path.isdir(_DDG_DIR):
+                shutil.rmtree(_DDG_DIR, ignore_errors=True)
+            shutil.move(extract_dir, _DDG_DIR)
+        return {"ok": True, "already_installed": False, "path": _DDG_DIR}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _chromium_args():
-    """Base Chromium args, plus --load-extension for uBlock Origin Lite
-    when (and only when) a verified copy is on disk -- re-checked on every
-    launch so a manually deleted/corrupted extension directory just falls
-    back to no extension instead of a broken launch."""
+    """Base Chromium args, plus --load-extension for every vetted extension
+    above that's (currently) verified on disk -- re-checked on every launch
+    so a manually deleted/corrupted extension directory just drops out of
+    the list instead of a broken launch. Chromium accepts a comma-separated
+    path list for both flags, so multiple extensions load side by side."""
     args = list(_CHROMIUM_ARGS)
-    if _ublock_manifest_ok(_UBLOCK_DIR):
-        args += [f"--disable-extensions-except={_UBLOCK_DIR}", f"--load-extension={_UBLOCK_DIR}"]
+    ext_dirs = [d for d, ok in ((_UBLOCK_DIR, _ublock_manifest_ok(_UBLOCK_DIR)),
+                                 (_DDG_DIR, _ddg_manifest_ok(_DDG_DIR))) if ok]
+    if ext_dirs:
+        joined = ",".join(ext_dirs)
+        args += [f"--disable-extensions-except={joined}", f"--load-extension={joined}"]
     return args
 
 

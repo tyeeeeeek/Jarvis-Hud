@@ -14,7 +14,7 @@
 #   new narrow function here -- never widen one of these into a
 #   general-purpose executor.
 # ================================================================
-import os, re, sys, json, time, shutil, tempfile, threading, subprocess, urllib.parse, webbrowser
+import os, re, sys, json, time, shutil, tempfile, ipaddress, threading, subprocess, urllib.parse, webbrowser
 
 import requests
 
@@ -465,6 +465,151 @@ def _resolve_url(target):
     return "https://www.google.com/search?q=" + urllib.parse.quote_plus(target)
 
 
+# ---- Threat scanning (JarSecurity) -------------------------------------
+# Gates every URL Jarvis's browser actually navigates to (open_website,
+# search_web -- both funnel through _guarded_open_url below) as well as the
+# on-demand scan_url_safety tool. Report/block-only: never touches, kills,
+# or "cleans" anything, same philosophy as the rest of run_security_check().
+# Deliberately just link scanning, not a shell-command scanner -- every
+# command Jarvis can ever run is already a fixed, curated argv (see
+# _DIAGNOSTIC_COMMANDS above), so there is no free-form "command" input to
+# scan in the first place.
+_THREAT_BLOCKLIST_PATH = os.path.join(JARVIS_DIR, "security_blocklist.txt")
+# Free, no-API-key-required public feed of active malware-hosting domains
+# (abuse.ch's URLhaus project) -- refreshed at most every _THREAT_BLOCKLIST_MAX_AGE
+# seconds so a stale/unreachable feed never blocks navigation on its own.
+_THREAT_BLOCKLIST_URL = "https://urlhaus.abuse.ch/downloads/hostfile/"
+_THREAT_BLOCKLIST_MAX_AGE = 6 * 3600
+# Curated extensions that mean a URL points straight at an executable or
+# script rather than a normal page -- the classic "click this link, it runs
+# on your machine" delivery format. Same curated-substring style as
+# _SUSPICIOUS_PROCESS_NAMES above, not an exhaustive/generic block-everything
+# rule.
+_DANGEROUS_URL_EXTENSIONS = (
+    ".exe", ".msi", ".scr", ".pif", ".bat", ".cmd", ".vbs", ".vbe",
+    ".js", ".jse", ".wsf", ".ps1", ".psm1", ".jar", ".apk",
+)
+_threat_blocklist_cache = {"hosts": frozenset(), "mtime": None}
+
+
+def _parse_hostfile(text):
+    hosts = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            hosts.add(parts[1].lower())
+    return hosts
+
+
+def refresh_threat_blocklist(force: bool = False) -> dict:
+    """Best-effort refresh of the local malicious-host cache from URLhaus's
+    free public host list -- used by the URL threat check below to flag
+    known malware-hosting domains before Jarvis ever navigates to them.
+    Skipped (no network call) if the cache is already fresh unless
+    force=True. Never raises -- a network hiccup just means the existing
+    cache (or an empty one) keeps being used until the next sweep. Called
+    automatically as part of run_security_check()'s scheduled sweep."""
+    try:
+        if not force and os.path.exists(_THREAT_BLOCKLIST_PATH):
+            age = time.time() - os.path.getmtime(_THREAT_BLOCKLIST_PATH)
+            if age < _THREAT_BLOCKLIST_MAX_AGE:
+                return {"ok": True, "refreshed": False}
+        r = requests.get(_THREAT_BLOCKLIST_URL, timeout=20)
+        r.raise_for_status()
+        hosts = _parse_hostfile(r.text)
+        if not hosts:
+            return {"ok": False, "error": "empty blocklist response"}
+        _ensure_jarvis_dir()
+        tmp = _THREAT_BLOCKLIST_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(sorted(hosts)))
+        os.replace(tmp, _THREAT_BLOCKLIST_PATH)
+        _threat_blocklist_cache["hosts"] = frozenset(hosts)
+        _threat_blocklist_cache["mtime"] = os.path.getmtime(_THREAT_BLOCKLIST_PATH)
+        return {"ok": True, "refreshed": True, "count": len(hosts)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _load_threat_blocklist_hosts():
+    try:
+        mtime = os.path.getmtime(_THREAT_BLOCKLIST_PATH)
+    except OSError:
+        return _threat_blocklist_cache["hosts"]
+    if _threat_blocklist_cache["mtime"] != mtime:
+        try:
+            with open(_THREAT_BLOCKLIST_PATH, "r", encoding="utf-8") as f:
+                _threat_blocklist_cache["hosts"] = frozenset(l.strip() for l in f if l.strip())
+            _threat_blocklist_cache["mtime"] = mtime
+        except Exception:
+            pass
+    return _threat_blocklist_cache["hosts"]
+
+
+def _url_threat_verdict(url):
+    """(blocked: bool, reason: str) for a single URL -- raw-IP host,
+    punycode/homograph host, a direct link to a risky executable/script file
+    type, or a host on the URLhaus blocklist. No network call unless the
+    local blocklist cache is stale (see refresh_threat_blocklist)."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return False, ""
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, ""
+    try:
+        ipaddress.ip_address(host)
+        return True, "that's a raw IP address rather than a normal domain name -- a common phishing/malware-hosting trick"
+    except ValueError:
+        pass
+    if "xn--" in host:
+        return True, "that domain uses punycode, often used to impersonate a trusted site with lookalike characters"
+    path = (parsed.path or "").lower()
+    for ext in _DANGEROUS_URL_EXTENSIONS:
+        if path.endswith(ext):
+            return True, f"that link points straight at a {ext} file, a common malware delivery format"
+    refresh_threat_blocklist()
+    hosts = _load_threat_blocklist_hosts()
+    bare = host[4:] if host.startswith("www.") else host
+    if host in hosts or bare in hosts:
+        return True, "that domain is on the URLhaus known-malware-hosting blocklist"
+    return False, ""
+
+
+def scan_url_safety(url: str) -> str:
+    """Read-only safety scan of a single link -- checks for a raw-IP host, a
+    punycode/homograph domain, a direct link to a risky executable/script
+    file type, or a host on the URLhaus known-malware blocklist. Never
+    navigates anywhere itself -- open_website/search_web already run this
+    same check automatically before opening anything. Use this whenever the
+    user pastes a suspicious link and asks "is this safe"/"scan this link"."""
+    url = (url or "").strip()
+    if not url:
+        return "What link should I scan sir?"
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+    blocked, reason = _url_threat_verdict(url)
+    if blocked:
+        return f"I'd block that one sir -- {reason}."
+    return "That link looks clean sir -- no known threats or risky patterns detected."
+
+
+def _guarded_open_url(url):
+    """Every browser_control.open_url() call in this module goes through
+    here first -- blocks known-malicious/high-risk links before the browser
+    ever navigates to them instead of just reporting on them after the
+    fact."""
+    blocked, reason = _url_threat_verdict(url)
+    if blocked:
+        _log_security_event({"blocked_url": url, "reason": reason})
+        return f"I blocked that link sir -- {reason}."
+    return browser_control.open_url(url)
+
+
 def open_website(target: str) -> str:
     """Open a website in the dedicated, visible Jarvis browser window and
     bring it to the front -- a known site name (youtube, gmail, github,
@@ -473,10 +618,12 @@ def open_website(target: str) -> str:
     play_youtube so it can be reliably re-focused, falling back to the OS
     default browser only if that dedicated window is unavailable. For
     actually searching-and-playing something on YouTube, use play_youtube
-    instead."""
+    instead. The target link is screened for known-malicious/high-risk
+    patterns first (see scan_url_safety) and blocked rather than opened if
+    it's flagged."""
     url = _resolve_url(target)
     if BROWSER_CONTROL_AVAILABLE:
-        return browser_control.open_url(url)
+        return _guarded_open_url(url)
     label = target if target in _SITE_ALIASES or "." in (target or "") else f"a search for {target}"
     try:
         if not webbrowser.open(url):
@@ -491,7 +638,7 @@ def search_web(query: str) -> str:
     dedicated Jarvis browser window."""
     url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query or "")
     if BROWSER_CONTROL_AVAILABLE:
-        return browser_control.open_url(url)
+        return _guarded_open_url(url)
     try:
         if not webbrowser.open(url):
             return "I couldn't find a browser to search with sir."
@@ -1108,16 +1255,69 @@ def _open_listening_ports():
     return ports
 
 
+def _check_firmware_and_drivers():
+    """Read-only, best-effort firmware/driver freshness check -- report-only,
+    same philosophy as the rest of run_security_check(): never installs or
+    applies an update itself, just flags what's outdated. Linux: uses
+    fwupdmgr (the standard LVFS firmware-update tool) to list devices with an
+    available firmware update. Windows: uses pnputil to list devices
+    currently reporting a driver problem (Windows has no built-in,
+    scriptable "check for newer driver" query short of the paid Windows
+    Update APIs, so a problem-device count is the honest, achievable signal
+    here). Returns (summary_text, flagged)."""
+    if IS_WINDOWS:
+        if not shutil.which("pnputil"):
+            return "unavailable -- pnputil not found", False
+        try:
+            out = subprocess.run(["pnputil", "/enum-devices", "/problem"],
+                                  capture_output=True, text=True, timeout=20).stdout
+        except Exception as e:
+            return f"unavailable ({e})", False
+        problem_count = out.count("Instance ID:")
+        if problem_count:
+            return f"{problem_count} device(s) with driver problems", True
+        return "no driver problems detected", False
+
+    if not shutil.which("fwupdmgr"):
+        return "unavailable -- fwupdmgr not installed", False
+    try:
+        proc = subprocess.run(["fwupdmgr", "get-updates", "--json"],
+                               capture_output=True, text=True, timeout=45)
+        data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+        devices = data.get("Devices", [])
+    except Exception as e:
+        return f"unavailable ({e})", False
+    if devices:
+        names = sorted({d.get("Name") or d.get("Vendor") or "device" for d in devices})[:5]
+        return f"{len(devices)} firmware update(s) available ({', '.join(names)})", True
+    return "firmware up to date", False
+
+
+def check_firmware_drivers() -> str:
+    """Read-only check for outdated device firmware (via fwupdmgr on Linux)
+    or devices reporting driver problems (via pnputil on Windows). Never
+    installs or applies anything itself -- also runs automatically as part
+    of JarSecurity's scheduled sweep. Use this whenever the user asks to
+    check their firmware/drivers."""
+    note, flagged = _check_firmware_and_drivers()
+    if flagged:
+        return f"Firmware/driver check sir: {note} -- worth a look."
+    return f"Firmware/driver check sir: {note}."
+
+
 def run_security_check() -> str:
     """JarSecurity sub-agent's core sweep: lists listening TCP/UDP ports,
     flags any running process matching a curated list of known
     cryptominer/backdoor names or executing out of a world-writable temp
     directory, re-runs the same LAN scan scan_network() already does
-    (flagging brand-new devices as possible intruders), and verifies --
-    installing if missing -- uBlock Origin Lite in the dedicated Jarvis
-    browser window. Every run is logged to ~/.jarvis/security_log.jsonl.
-    Safe to call anytime on demand; also runs automatically in the
-    background on a fixed schedule."""
+    (flagging brand-new devices as possible intruders), flags outdated
+    device firmware/drivers (see check_firmware_drivers), refreshes the
+    local malicious-link blocklist used by open_website/search_web/
+    scan_url_safety, and verifies -- installing if missing -- each vetted
+    browser security/privacy extension (uBlock Origin Lite, DuckDuckGo
+    Privacy Essentials) in the dedicated Jarvis browser window. Every run is
+    logged to ~/.jarvis/security_log.jsonl. Safe to call anytime on demand;
+    also runs automatically in the background on a fixed schedule."""
     global LAST_SECURITY_RESULT
     ports = _open_listening_ports()
     suspicious = _find_suspicious_processes()
@@ -1127,20 +1327,33 @@ def run_security_check() -> str:
     new_count = net.get("new_count", 0) if not net_error else 0
     device_count = len(net.get("devices", [])) if not net_error else 0
 
-    ublock_ok = False
-    ublock_note = "unavailable -- browser control module isn't available"
-    if BROWSER_CONTROL_AVAILABLE:
-        status = browser_control.verify_ublock_origin()
+    firmware_note, firmware_flagged = _check_firmware_and_drivers()
+
+    blocklist_result = refresh_threat_blocklist()
+    if blocklist_result.get("ok"):
+        blocklist_hosts = len(_load_threat_blocklist_hosts())
+        blocklist_note = f"{blocklist_hosts} known-malicious hosts loaded"
+    else:
+        blocklist_note = f"refresh failed ({blocklist_result.get('error', 'unknown error')})"
+
+    def _sweep_extension(label, verify_fn, install_fn):
+        status = verify_fn()
         if status.get("installed"):
-            ublock_ok = True
-            ublock_note = "verified"
-        else:
-            installed = browser_control.install_ublock_origin()
-            ublock_ok = bool(installed.get("ok"))
-            if ublock_ok:
-                ublock_note = "installed just now"
-            else:
-                ublock_note = f"install failed ({installed.get('error', 'unknown error')})"
+            return True, f"{label} verified"
+        installed = install_fn()
+        ok = bool(installed.get("ok"))
+        note = "installed just now" if ok else f"install failed ({installed.get('error', 'unknown error')})"
+        return ok, f"{label} {note}"
+
+    if BROWSER_CONTROL_AVAILABLE:
+        ublock_ok, ublock_summary = _sweep_extension(
+            "uBlock Origin Lite", browser_control.verify_ublock_origin, browser_control.install_ublock_origin)
+        ddg_ok, ddg_summary = _sweep_extension(
+            "DuckDuckGo Privacy Essentials", browser_control.verify_duckduckgo_privacy, browser_control.install_duckduckgo_privacy)
+    else:
+        ublock_ok = ddg_ok = False
+        ublock_summary = "uBlock Origin Lite unavailable -- browser control module isn't available"
+        ddg_summary = "DuckDuckGo Privacy Essentials unavailable -- browser control module isn't available"
 
     critical = bool(suspicious) or new_count > 0
 
@@ -1158,16 +1371,21 @@ def run_security_check() -> str:
         summary_parts.append(f"{new_count} new device{'s' if new_count != 1 else ''} on the LAN")
     else:
         summary_parts.append(f"{device_count} known devices on the LAN, nothing new")
-    summary_parts.append(f"uBlock Origin Lite {ublock_note}")
+    summary_parts.append(f"firmware/drivers: {firmware_note}")
+    summary_parts.append(f"threat blocklist: {blocklist_note}")
+    summary_parts.append(ublock_summary)
+    summary_parts.append(ddg_summary)
     result_text = "; ".join(summary_parts) + "."
 
     LAST_SECURITY_RESULT = {
         "critical": critical, "open_ports": len(ports), "suspicious": suspicious,
-        "new_devices": new_count, "ublock_ok": ublock_ok,
+        "new_devices": new_count, "firmware_flagged": firmware_flagged,
+        "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
     }
     _log_security_event({
         "open_ports": len(ports), "suspicious": suspicious, "new_devices": new_count,
-        "ublock_ok": ublock_ok, "critical": critical,
+        "firmware_flagged": firmware_flagged, "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
+        "critical": critical,
     })
     return result_text
 
@@ -1201,6 +1419,39 @@ def install_ublock_origin() -> str:
     if result.get("already_installed"):
         return "uBlock Origin Lite is already installed and verified sir."
     return "uBlock Origin Lite installed and verified sir -- close and reopen the browser window for it to take effect."
+
+
+def verify_duckduckgo_privacy() -> str:
+    """Read-only check: is DuckDuckGo Privacy Essentials (tracker blocking,
+    HTTPS upgrade, Fire button) already installed and verified in the
+    dedicated Jarvis browser window? Never downloads anything itself -- use
+    install_duckduckgo_privacy for that."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return "The browser control module isn't available sir, so I can't check that."
+    status = browser_control.verify_duckduckgo_privacy()
+    if status.get("installed"):
+        return "DuckDuckGo Privacy Essentials is installed and verified in your browser sir."
+    return ("DuckDuckGo Privacy Essentials isn't installed in your browser yet sir -- "
+            "say \"install duckduckgo privacy\" and I'll fetch it.")
+
+
+def install_duckduckgo_privacy() -> str:
+    """Download the latest official DuckDuckGo Privacy Essentials release
+    straight from its own GitHub repo and install it (unpacked) into the
+    dedicated Jarvis browser window -- a no-op if a verified copy is already
+    there. Use this whenever the user asks to install/set up DuckDuckGo's
+    tracker-blocking/privacy extension in the Jarvis browser. Close and
+    reopen the browser window afterward for a freshly installed extension to
+    actually load."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return "The browser control module isn't available sir, so I can't install that."
+    result = browser_control.install_duckduckgo_privacy()
+    if not result.get("ok"):
+        return f"I couldn't install DuckDuckGo Privacy Essentials sir: {result.get('error', 'unknown error')}."
+    if result.get("already_installed"):
+        return "DuckDuckGo Privacy Essentials is already installed and verified sir."
+    return ("DuckDuckGo Privacy Essentials installed and verified sir -- "
+            "close and reopen the browser window for it to take effect.")
 
 
 # ================================================================ TAILSCALE

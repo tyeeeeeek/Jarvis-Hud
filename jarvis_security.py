@@ -9,8 +9,11 @@
 #
 #   Wired into jarvis.py's _security_watcher_thread: runs
 #   tools.run_security_check() on a fixed cadence (open ports, suspicious
-#   processes, a LAN scan for new/unknown devices, and uBlock Origin Lite
-#   verify/install in the dedicated Jarvis browser). send_summary() fires
+#   processes, a LAN scan for new/unknown devices, outdated device
+#   firmware/drivers, a refresh of the malicious-link blocklist that gates
+#   browser navigation, and verify/install for each vetted browser
+#   security/privacy extension -- uBlock Origin Lite, DuckDuckGo Privacy
+#   Essentials -- in the dedicated Jarvis browser). send_summary() fires
 #   once after every check, send_alert() fires immediately the moment
 #   run_security_check() flags something critical (a suspicious process or
 #   a brand-new device on the LAN) instead of waiting for the next
