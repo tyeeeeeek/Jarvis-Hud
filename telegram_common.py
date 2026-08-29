@@ -17,6 +17,16 @@
 #   trail so Jarvis (or the user) can check that background sub-agents like
 #   JarvisCPU_Alerts and JarvisImprovement are actually firing on their
 #   schedules, not just running silently.
+#
+#   Also provides ask_grounded() -- a chat-only local Ollama call (same
+#   no-tools, no-command safety model as jarvis.py's own ask_ollama offline
+#   fallback) that the read-only sub-agent bots (JarvisCPU_Alerts,
+#   JarSecurity, JarvisImprovement's question path) use to turn a fixed
+#   report into a natural reply to whatever the user actually asked,
+#   without ever gaining a new capability: it only ever sees data the
+#   caller already collected through its existing, narrow tool (a health
+#   check, a security sweep log, agent status), never runs a tool itself,
+#   and can't reach anything beyond localhost:11434.
 # ================================================================
 import json
 import os
@@ -26,6 +36,42 @@ import requests
 
 _JARVIS_DIR = os.path.join(os.path.expanduser("~"), ".jarvis")
 DELIVERY_LOG_PATH = os.path.join(_JARVIS_DIR, "telegram_delivery_log.jsonl")
+
+_OLLAMA_URL = "http://localhost:11434/api/generate"
+_OLLAMA_MODEL = "llama3.2"
+
+
+def ask_grounded(agent_name: str, role_description: str, context_text: str, user_text: str) -> str:
+    """Turn `context_text` (a report the caller already generated through
+    its own narrow, existing tool -- never fetched here) into a natural-
+    language reply to `user_text`, the message the user actually sent.
+    Chat-only local Ollama call, no tools, no network access beyond
+    localhost -- mirrors jarvis.py's ask_ollama offline-fallback safety
+    model exactly, right down to "never invent facts not given to you".
+    Falls back to returning context_text unchanged if Ollama isn't running
+    or errors, so a two-way bot still replies with something true even
+    when the local model is unavailable."""
+    system = (
+        f"You are {agent_name}, a narrow Jarvis sub-agent whose only job is {role_description}. "
+        "You have no tools and cannot run commands, browse the web, or take any action -- you can "
+        "only read the data given to you below and answer the user's message using it. Never invent "
+        "facts, numbers, or events that aren't in that data. If the data doesn't answer what they "
+        "asked, say so plainly rather than guessing. Speak with calm, blunt confidence, address the "
+        "user as sir occasionally (not every sentence), keep it under 60 words, no markdown, no "
+        "bullet points, no emoji."
+    )
+    prompt = f"{system}\n\nData you know:\n{context_text}\n\nUser just said: {user_text}\n{agent_name}:"
+    try:
+        r = requests.post(_OLLAMA_URL, json={
+            "model": _OLLAMA_MODEL, "prompt": prompt, "stream": False,
+        }, timeout=30)
+        if r.status_code == 200:
+            reply = (r.json().get("response") or "").strip()
+            if reply:
+                return reply
+    except Exception as e:
+        print(f"  [{agent_name}] ask_grounded error: {e}")
+    return context_text
 
 
 def _log_delivery(agent: str, text: str) -> None:

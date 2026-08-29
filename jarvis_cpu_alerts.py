@@ -14,9 +14,13 @@
 #
 #   Two-way for exactly one thing: any incoming text message from the
 #   authorized chat triggers an immediate, on-demand check_system_health()
-#   run and a reply with the result -- see poll_thread(). It still never
-#   accepts commands or forwards text anywhere else, so a leaked token can
-#   only be used to ask "how's the PC doing", never to control anything.
+#   run, and the reply is that real result put through
+#   telegram_common.ask_grounded() so it actually answers whatever was
+#   asked ("what's my disk space" vs "are you overheating") instead of
+#   always sending the same fixed report -- see poll_thread(). Grounding
+#   only ever sees check_system_health()'s own output, so it still can't
+#   invent a reading or accept a command; a leaked token can only be used
+#   to ask "how's the PC doing", never to control anything.
 #
 #   Fully inert until JARVIS_CPU_ALERTS_BOT_TOKEN is set in .env; reuses
 #   TELEGRAM_CHAT_ID (same user, same phone) unless
@@ -72,19 +76,23 @@ def send_test_message() -> bool:
 def poll_thread(pipeline_stop) -> None:
     """This bot's two-way half: long-polls its own token/chat (isolated from
     every other bot's inbox) and, on any incoming text message, runs a fresh
-    check_system_health() and replies with the result -- an on-demand PC
-    health/status update without waiting for the next scheduled 2-hour
-    check. tools is imported locally (not at module load time) because
-    tools.py imports this module itself; importing it up top would be a
-    circular import. check_system_health() is a fast, read-only-except-for-
-    routine-cleanup call (sensors + disk usage), so it's run right here on
-    the poll thread rather than spun off in the background."""
-    def on_message(_text):
+    check_system_health() and replies with a natural answer to whatever was
+    actually asked, grounded in that real result via
+    telegram_common.ask_grounded() -- an on-demand PC health/status update
+    without waiting for the next scheduled 2-hour check. tools is imported
+    locally (not at module load time) because tools.py imports this module
+    itself; importing it up top would be a circular import.
+    check_system_health() is a fast, read-only-except-for-routine-cleanup
+    call (sensors + disk usage), so it's run right here on the poll thread
+    rather than spun off in the background."""
+    def on_message(text):
         import tools
         try:
             result = tools.check_system_health()
         except Exception as e:
             _send(f"Couldn't run a health check sir: {e}")
             return
-        _send(f"WATCHDOG ON-DEMAND CHECK — {result}")
+        reply = telegram_common.ask_grounded(
+            _AGENT_NAME, "monitoring this PC's thermal and disk health", result, text)
+        _send(reply)
     telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)

@@ -16,20 +16,27 @@
 #   pass completes -- whether it made changes, found nothing safe to
 #   improve, or hit the time-box.
 #
-#   Two-way for exactly one thing: any incoming text message from the
-#   authorized chat is treated as an on-demand self-improvement request --
-#   identical to the user asking Jarvis directly "improve on ..." -- and run
-#   through the same tools.self_improve() (same hard constraints, same
-#   syntax-check/build-verify gate before any commit) rather than any free-
-#   form command. See poll_thread(). A leaked token could waste a self-
-#   improve run, but can never run an arbitrary command or touch anything
-#   outside self_improve()'s own constraints.
+#   Two-way, split by whether the incoming text reads as a question or an
+#   instruction (see _looks_like_question()): a question ("what did you fix
+#   yesterday?", "are you running right now?") gets an immediate reply,
+#   grounded (via telegram_common.ask_grounded()) in tools.agent_status()'s
+#   real, on-disk history -- never a git log, secret, or anything beyond
+#   that same read-only status the user could already ask the main Jarvis
+#   bot for. Anything else is treated as an on-demand self-improvement
+#   request -- identical to the user asking Jarvis directly "improve on
+#   ..." -- and run through the same tools.self_improve() (same hard
+#   constraints, same syntax-check/build-verify gate before any commit)
+#   rather than any free-form command. See poll_thread(). A leaked token
+#   could waste a self-improve run or read agent status, but can never run
+#   an arbitrary command or touch anything outside self_improve()'s own
+#   constraints.
 #
 #   Fully inert until JARVIS_IMPROVEMENT_BOT_TOKEN is set in .env; reuses
 #   TELEGRAM_CHAT_ID (same user, same phone) unless
 #   JARVIS_IMPROVEMENT_CHAT_ID overrides it.
 # ================================================================
 import os
+import re
 import threading
 
 import telegram_common
@@ -41,6 +48,23 @@ AVAILABLE = bool(BOT_TOKEN and CHAT_ID)
 
 
 _AGENT_NAME = "JarvisImprovement"
+
+# Distinguishes "what did you improve yesterday?" (answer it, don't spend
+# several minutes on a Claude Code run) from "improve the weather widget"
+# (an actual instruction, still routed to self_improve() as before). Errs
+# toward treating anything ambiguous as an instruction -- self_improve()
+# has its own hard constraints and a syntax-check/build-verify gate before
+# any commit, so misrouting a real question into it wastes a run at worst,
+# never causes harm; the reverse (silently skipping a real instruction)
+# would be worse.
+_QUESTION_WORDS_RE = re.compile(
+    r"^(what|how|why|when|where|who|which|is|are|was|were|did|do|does|"
+    r"have|has|can|could|will|would|should)\b", re.IGNORECASE)
+
+
+def _looks_like_question(text: str) -> bool:
+    t = (text or "").strip()
+    return t.endswith("?") or bool(_QUESTION_WORDS_RE.match(t))
 
 
 def _send(text: str) -> bool:
@@ -105,19 +129,22 @@ def send_test_message() -> bool:
 
 def poll_thread(pipeline_stop) -> None:
     """This bot's two-way half: long-polls its own token/chat (isolated from
-    every other bot's inbox) and treats any incoming text message as an
-    on-demand self-improvement request, run through tools.self_improve() --
-    the exact same mechanism, constraints, and build-verify gate as the
-    "Jarvis, improve on ..." voice/text command. self_improve() can take
-    several minutes (it shells out to Claude Code), so it's handed off to a
-    background thread rather than run on the poll loop itself, which would
-    otherwise sit unable to notice a stop signal or a second incoming
-    message until the run finished; an immediate ack goes out first so the
-    user knows it was received. self_improve() already sends its own
-    JarvisImprovement report (via tools._report_ondemand_improve) once the
-    run completes, so nothing further needs to be sent from here. tools is
-    imported locally, not at module load time, because tools.py imports
-    this module -- importing it back up top would be a circular import."""
+    every other bot's inbox). A question (see _looks_like_question()) gets
+    an immediate reply, grounded via telegram_common.ask_grounded() in
+    tools.agent_status()'s real on-disk history -- no self-improve run
+    triggered. Anything else is treated as an on-demand self-improvement
+    request, run through tools.self_improve() -- the exact same mechanism,
+    constraints, and build-verify gate as the "Jarvis, improve on ..."
+    voice/text command. self_improve() can take several minutes (it shells
+    out to Claude Code), so it's handed off to a background thread rather
+    than run on the poll loop itself, which would otherwise sit unable to
+    notice a stop signal or a second incoming message until the run
+    finished; an immediate ack goes out first so the user knows it was
+    received. self_improve() already sends its own JarvisImprovement report
+    (via tools._report_ondemand_improve) once the run completes, so nothing
+    further needs to be sent from here. tools is imported locally, not at
+    module load time, because tools.py imports this module -- importing it
+    back up top would be a circular import."""
     def _run(focus):
         import tools
         try:
@@ -126,6 +153,17 @@ def poll_thread(pipeline_stop) -> None:
             print(f"  [JarvisImprovement] on-demand run failed: {e}")
 
     def on_message(text):
+        if _looks_like_question(text):
+            import tools
+            try:
+                context = tools.agent_status()
+            except Exception as e:
+                context = f"Couldn't pull agent status: {e}"
+            reply = telegram_common.ask_grounded(
+                _AGENT_NAME, "running Jarvis's daily self-improvement passes and reporting on them",
+                context, text)
+            _send(reply)
+            return
         _send(f"On it sir -- looking into \"{text.strip()}\" now. I'll report back when it's done.")
         threading.Thread(target=_run, args=(text,), daemon=True).start()
 

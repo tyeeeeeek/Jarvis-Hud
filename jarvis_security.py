@@ -20,14 +20,18 @@
 #   scheduled summary.
 #
 #   Two-way for exactly one thing: any incoming text message from the
-#   authorized chat triggers an immediate reply summarizing recent security
-#   events, sweeps, and jobs this bot has been running -- see poll_thread().
-#   That reply is read-only, built from the on-disk sweep log and the
-#   shared delivery log, never a fresh sweep itself (a full sweep touches
-#   the network and the browser and can take a while; it still runs on its
-#   own 4-hour schedule). It still never accepts commands or forwards text
-#   anywhere else, so a leaked token can only be used to ask "what have you
-#   found lately", never to control anything.
+#   authorized chat triggers an immediate reply, grounded (via
+#   telegram_common.ask_grounded()) in the same read-only summary of recent
+#   security events, sweeps, and jobs this bot has been running -- so
+#   "what's my sweep history" and "any new devices on the LAN" get
+#   different, actually-relevant answers instead of the same fixed dump --
+#   see poll_thread(). That underlying summary is read-only, built from the
+#   on-disk sweep log and the shared delivery log, never a fresh sweep
+#   itself (a full sweep touches the network and the browser and can take a
+#   while; it still runs on its own 4-hour schedule). Grounding only ever
+#   sees that summary, so it still can't invent a finding or accept a
+#   command; a leaked token can only be used to ask "what have you found
+#   lately", never to control anything.
 #
 #   Fully inert until JARVIS_SECURITY_BOT_TOKEN is set in .env; reuses
 #   TELEGRAM_CHAT_ID (same user, same phone) unless
@@ -83,21 +87,27 @@ def send_test_message() -> bool:
 
 def poll_thread(pipeline_stop) -> None:
     """This bot's two-way half: long-polls its own token/chat (isolated from
-    every other bot's inbox) and, on any incoming text message, replies
-    with tools.security_status_report() -- a read-only summary of recent
-    sweeps and jobs pulled from ~/.jarvis/security_log.jsonl and the shared
-    delivery log. Deliberately doesn't trigger a fresh run_security_check()
-    itself (that sweep touches the network and the browser and can take a
-    while); it just reports what the scheduled 4-hour sweep has already
-    found, so the reply is fast. tools is imported locally, not at module
-    load time, because tools.py imports this module -- importing it back up
-    top would be a circular import."""
-    def on_message(_text):
+    every other bot's inbox) and, on any incoming text message, pulls
+    tools.security_status_report() -- a read-only summary of recent sweeps
+    and jobs from ~/.jarvis/security_log.jsonl and the shared delivery log
+    -- and replies with that summary put through
+    telegram_common.ask_grounded() so the reply actually answers what was
+    asked instead of always sending the same fixed dump. Deliberately
+    doesn't trigger a fresh run_security_check() itself (that sweep touches
+    the network and the browser and can take a while); it just reports what
+    the scheduled 4-hour sweep has already found, so the reply is fast.
+    tools is imported locally, not at module load time, because tools.py
+    imports this module -- importing it back up top would be a circular
+    import."""
+    def on_message(text):
         import tools
         try:
             report = tools.security_status_report()
         except Exception as e:
             _send(f"Couldn't pull a security status report sir: {e}")
             return
-        _send(report)
+        reply = telegram_common.ask_grounded(
+            _AGENT_NAME, "monitoring this PC's cybersecurity status and reporting sweep findings",
+            report, text)
+        _send(reply)
     telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)
