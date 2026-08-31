@@ -717,6 +717,8 @@ def _on_brain_creation(payload):
     })
     if lan_url:
         print(f"  [Creation] Also reachable on your phone/tailnet -> {lan_url}")
+        title = payload.get("title", "") or "Your creation"
+        telegram_bridge.send_message(f"{title} is ready sir -- open it on your phone: {lan_url}")
     # Both kinds pop straight into Brave, front-and-center, the moment
     # they're ready -- like a Claude artifact appearing -- in addition to
     # the in-HUD panel above; a dashboard still ALSO shows in the HUD panel
