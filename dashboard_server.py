@@ -166,11 +166,25 @@ def start_server():
     _server_info["dns_name"] = cert_info[2] if cert_info else None
 
     def _run():
-        if cert_info:
-            cert_path, key_path, _dns = cert_info
-            app.run(host=host, port=PORT, use_reloader=False, ssl_context=(cert_path, key_path))
-        else:
-            app.run(host=host, port=PORT, use_reloader=False)
+        try:
+            if cert_info:
+                cert_path, key_path, _dns = cert_info
+                app.run(host=host, port=PORT, use_reloader=False, ssl_context=(cert_path, key_path))
+            else:
+                app.run(host=host, port=PORT, use_reloader=False)
+        except Exception as e:
+            # app.run() blocks for as long as the server is actually up --
+            # reaching here means it never bound (port already in use, bad
+            # cert, etc.) or died mid-run. Reset _server_info so creation_
+            # url() honestly reports "no link" afterward instead of going on
+            # handing out a URL that looks fine but nothing is answering --
+            # a stale _server_info here is exactly the kind of "wrong but
+            # confident" link build_creation's Telegram notice must not send.
+            print(f"  [Dashboard] Creations LAN server crashed -- disabling phone links: {e}")
+            _server_info["host"] = None
+            _server_info["port"] = None
+            _server_info["https"] = False
+            _server_info["dns_name"] = None
 
     threading.Thread(target=_run, daemon=True, name="Dashboard").start()
     if cert_info:

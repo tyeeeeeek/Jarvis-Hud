@@ -51,7 +51,7 @@ _TOOL_FUNCS = [
     tools.enable_eyes, tools.disable_eyes, tools.describe_screen,
     tools.set_reminder, tools.list_reminders, tools.cancel_reminder,
     tools.add_note, tools.list_notes, tools.delete_note,
-    tools.build_creation,
+    tools.build_creation, tools.list_creations,
     tools.ask_claude_web,
     tools.self_improve,
     tools.agent_status, tools.send_agent_test_message,

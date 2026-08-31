@@ -77,6 +77,8 @@ JARVIS_DIR = os.path.join(HOME, ".jarvis")
 STATE_PATH = os.path.join(JARVIS_DIR, "state.json")
 REMINDERS_PATH = os.path.join(JARVIS_DIR, "reminders.json")
 NOTES_PATH = os.path.join(JARVIS_DIR, "notes.json")
+CREATIONS_LOG_PATH = os.path.join(JARVIS_DIR, "creations_log.json")
+_CREATIONS_LOG_MAX = 200
 
 
 def _ensure_jarvis_dir():
@@ -1883,10 +1885,129 @@ def build_creation(description: str, kind: str = "dashboard") -> str:
     if not os.path.exists(index_path):
         return json.dumps({"ok": False, "message": "I finished but couldn't find the result sir."})
 
+    # slug is included so callers never have to re-derive it (it's already
+    # exactly the folder name -- see _slugify above); notify_creation_ready
+    # below is what actually works out the phone/tailnet link and notifies
+    # the user, called separately by whichever caller is running in
+    # jarvis.py's own long-lived process (see that function's docstring for
+    # why it can't safely happen in here).
     return json.dumps({
-        "ok": True, "kind": kind, "title": description,
+        "ok": True, "kind": kind, "title": description, "slug": slug,
         "path": index_path.replace("\\", "/"),
     })
+
+
+def _verify_creation_url(url: str) -> bool:
+    """A quick real GET against a just-built creation's own phone/tailnet
+    URL -- confirms the page actually loads (200) before notify_creation_
+    ready trusts it enough to text/record it, rather than trusting that
+    dashboard_server._server_info being populated means the server is
+    actually up and serving right now. Short timeout since this sits in
+    the "immediately after it's built" notification path -- a slow/dead
+    server should fail fast, not delay the notice."""
+    try:
+        resp = requests.get(url, timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def notify_creation_ready(payload: dict):
+    """Not an MCP tool -- called once per successful build_creation() (or
+    build_finance_dashboard(), which returns the same payload shape) by
+    whichever caller is running inside jarvis.py's own long-lived process:
+    jarvis.py's _on_brain_creation for the interactive voice/chat path.
+
+    Deliberately NOT called from inside build_creation() itself: build_
+    creation() is also invoked from within the short-lived, separate `claude
+    -p --mcp-config jarvis_mcp_server.py` subprocess brain.py spawns for
+    every interactive command (see brain.py's module docstring) -- that
+    subprocess never calls dashboard_server.start_server(), so
+    dashboard_server._server_info would always be empty there and
+    creation_url() would always (wrongly) report no phone link available,
+    even when the real phone dashboard in the main process is up. Calling
+    this from the main process instead is what makes the link determination
+    actually reliable.
+
+    Persists the creation (with or without a link -- see record_creation)
+    and always sends a Telegram notice, with the link if one's available or
+    an explicit note that it isn't, so the user is never left hearing
+    nothing. Returns the phone/tailnet URL (or None).
+
+    Before trusting the URL creation_url() hands back, it's actually
+    fetched (see _verify_creation_url below) -- creation_url() only ever
+    formats a string from _server_info, it can't tell if the Flask thread
+    it's describing is still alive (a crashed/never-bound server, a stale
+    Tailscale IP after a reconnect, an expired cert) versus just still
+    running. Sending/recording a link that LOOKS right but 404s or refuses
+    to connect would be worse than being upfront that there isn't one --
+    this is what makes the link genuinely reliable, not just present."""
+    kind = payload.get("kind", "dashboard")
+    slug = payload.get("slug", "")
+    title = payload.get("title", "") or "Your creation"
+
+    lan_url = None
+    try:
+        import dashboard_server
+        candidate = dashboard_server.creation_url(kind, slug)
+        if candidate and _verify_creation_url(candidate):
+            lan_url = candidate
+        elif candidate:
+            print(f"  [Creation] Phone/tailnet link didn't respond, not sending it: {candidate}")
+    except Exception as e:
+        print(f"  [Creation] Couldn't determine phone/tailnet link: {e}")
+
+    record_creation(title, kind, slug, lan_url)
+
+    try:
+        import telegram_bridge
+        if lan_url:
+            telegram_bridge.send_message(
+                f"{title} is ready sir -- open it on your phone: {lan_url}")
+        else:
+            telegram_bridge.send_message(
+                f"{title} is ready sir -- but I couldn't get you a phone link this "
+                "time (the phone dashboard isn't reachable). Ask me to list your recent "
+                "creations once it's back up.")
+    except Exception as e:
+        print(f"  [Creation] Couldn't send Telegram notice: {e}")
+
+    return lan_url
+
+
+def record_creation(title, kind, slug, url):
+    """Not an MCP tool -- called directly by notify_creation_ready right
+    after every build_creation() finishes successfully, so every creation
+    the user has ever been shown stays retrievable afterward (via
+    list_creations below) even after this session's in-memory creation
+    panel is gone. `url` is whatever creation_url() returned (and passed
+    _verify_creation_url) at the time -- None is stored as-is (rather than
+    skipped) so list_creations can say plainly that a given creation
+    currently has no phone link, instead of silently omitting it."""
+    log = _load_json(CREATIONS_LOG_PATH, [])
+    log.append({
+        "title": title, "kind": kind, "slug": slug, "url": url,
+        "ts": time.time(),
+    })
+    _save_json(CREATIONS_LOG_PATH, log[-_CREATIONS_LOG_MAX:])
+
+
+def list_creations(count: int = 10) -> str:
+    """List the most recent things Jarvis has built with build_creation
+    (dashboards and webpages), newest first, each with its phone/tailnet
+    link if one was available when it was built -- use this when the user
+    asks for the link to something built earlier, not just the one on
+    screen right now."""
+    log = _load_json(CREATIONS_LOG_PATH, [])
+    if not log:
+        return "I haven't built anything yet sir."
+    recent = list(reversed(log))[:max(1, int(count))]
+    lines = []
+    for c in recent:
+        when = time.strftime("%b %d %H:%M", time.localtime(c.get("ts", 0)))
+        link = c.get("url") or "no phone link available for this one"
+        lines.append(f"\"{c.get('title', 'Untitled')}\" ({when}): {link}")
+    return "Here's what I've built recently sir: " + " | ".join(lines)
 
 
 # ================================================================ WEB RESEARCH (nested, separately-scoped Claude call)

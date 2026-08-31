@@ -702,23 +702,25 @@ def _on_brain_creation(payload):
         print(f"  [Creation] couldn't read {path}: {e}")
         return
     kind = payload.get("kind", "dashboard")
-    # The directory build_creation() saved this into IS its slug (see
-    # tools.build_creation / _slugify) -- reused here rather than
-    # re-slugifying the title, so this can never drift from the exact
-    # folder dashboard_server._serve_creation actually reads from.
-    slug = os.path.basename(os.path.dirname(path))
-    lan_url = dashboard_server.creation_url(kind, slug)
+    title = payload.get("title", "") or "Your creation"
+    # Works out the phone/tailnet link (verifying it's actually reachable
+    # first), persists this creation to the retrievable log, and sends the
+    # Telegram notice (with or without a link) -- see tools.
+    # notify_creation_ready's docstring for why this has to happen here
+    # (jarvis.py's own long-lived process) rather than inside build_
+    # creation() itself.
+    lan_url = tools.notify_creation_ready(payload)
     _ws_broadcast({
         "type": "creation_ready",
-        "title": payload.get("title", ""),
+        "title": title,
         "kind": kind,
         "html": html,
         "url": lan_url,
     })
     if lan_url:
         print(f"  [Creation] Also reachable on your phone/tailnet -> {lan_url}")
-        title = payload.get("title", "") or "Your creation"
-        telegram_bridge.send_message(f"{title} is ready sir -- open it on your phone: {lan_url}")
+    else:
+        print("  [Creation] No phone/tailnet link available (dashboard server isn't running or didn't respond).")
     # Both kinds pop straight into Brave, front-and-center, the moment
     # they're ready -- like a Claude artifact appearing -- in addition to
     # the in-HUD panel above; a dashboard still ALSO shows in the HUD panel
