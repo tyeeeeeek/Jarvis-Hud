@@ -53,7 +53,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #000;
+  background: transparent; /* .hud-reveal (parent) supplies the black ground -- transparent here lets .hud-particles show through */
   overflow: hidden;
 }
 
@@ -65,20 +65,29 @@ html, body, #root {
   pointer-events: none;
 }
 
+/* Translucent faded grid across the whole background -- matching the
+   reference videos' look. Only a gentle dimming right at dead-center (not
+   a hard cutout) so it doesn't fight the ring/text there, unlike the
+   earlier version which was masked almost fully invisible everywhere. */
 .arc-reactor::after {
   content: "";
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(rgba(0,240,255,0.012) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,240,255,0.018) 1px, transparent 1px);
-  background-size: 48px 48px;
-  -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent 0%, transparent 32%, rgba(0,0,0,0.55) 60%, #000 100%);
-  mask-image: radial-gradient(circle at 50% 50%, transparent 0%, transparent 32%, rgba(0,0,0,0.55) 60%, #000 100%);
+    linear-gradient(rgba(0,240,255,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,240,255,0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, rgba(0,0,0,0.4) 0%, #000 55%);
+  mask-image: radial-gradient(circle at 50% 50%, rgba(0,0,0,0.4) 0%, #000 55%);
   pointer-events: none;
 }
 
-.arc-reactor__orb {
+/* Single glowing ring -- deliberately minimal (redesigned to match a specific
+   reference: dark grid + one centered ring with "JARVIS" text, a bottom icon
+   row, nothing else) rather than the layered orbit-rings/radar/particle
+   look this HUD had before. See .hud-dock below for the bottom row and
+   arc-reactor__ring::after for the rotating "spinner" highlight segment. */
+.arc-reactor__ring {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -86,280 +95,305 @@ html, body, #root {
   height: clamp(160px, 15vmin, 420px);
   border-radius: 50%;
   background: transparent;
-  border: clamp(2px, 0.2vmin, 4px) solid rgba(0,240,255,0.6);
+  border: clamp(2px, 0.2vmin, 4px) solid rgba(0,240,255,0.4);
   transform: translate(-50%, -50%) scale(var(--core-scale, 1));
   box-shadow:
     0 0 var(--glow-radius, 20px) rgba(0,240,255, var(--glow-opacity, 0.3)),
     0 0 80px rgba(0,240,255, calc(var(--glow-opacity, 0.3) * 0.35));
-  transition: transform 0.08s ease-out, box-shadow 0.08s ease-out;
+  transition: transform 0.08s ease-out, box-shadow 0.08s ease-out,
+    top 0.5s cubic-bezier(0.16,1,0.3,1), left 0.5s cubic-bezier(0.16,1,0.3,1),
+    width 0.5s cubic-bezier(0.16,1,0.3,1), height 0.5s cubic-bezier(0.16,1,0.3,1);
   cursor: pointer;
   z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-
-.arc-reactor__orbit-rings, .arc-reactor__haze {
+/* Minimized: a page is open, so the ring flows out to a small corner
+   mark rather than sitting centered behind the focused page -- the SAME
+   element throughout (no swap to a separate badge component), which is
+   what actually reads as "the logo relocates" instead of one thing
+   disappearing and another appearing. Click it (or it fires onClose in
+   ArcReactor.tsx) to return home. top/left (not bottom/right) so the
+   existing translate(-50%,-50%) centering keeps working unmodified. */
+.arc-reactor--minimized .arc-reactor__ring {
+  top: calc(100% - 58px);
+  left: calc(100% - 58px);
+  width: 64px;
+  height: 64px;
+}
+/* Camera focus owns the screen and renders its own self-contained ring
+   badge (see CameraFocusView.tsx) -- showing this ring too would just be
+   a second, redundant one, so the whole reactor (ring + label + dock)
+   fades out rather than minimizing. */
+.arc-reactor--hidden {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+/* Rotating bright arc-segment on top of the base ring -- the "gradient
+   border ring" trick (padding + mask-composite: exclude) so only the ring's
+   stroke lights up, not the whole disc. */
+.arc-reactor__ring::after {
+  content: "";
   position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+  inset: 0;
+  border-radius: 50%;
+  padding: clamp(2px, 0.2vmin, 4px);
+  background: conic-gradient(from 0deg, transparent 0deg, transparent 250deg, #00f0ff 300deg, #b6f6ff 335deg, transparent 358deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: ringSpin 3.4s linear infinite;
+  pointer-events: none;
+}
+@keyframes ringSpin { to { transform: rotate(360deg); } }
+
+.arc-reactor__ticks { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ring-tick { stroke: rgba(0,240,255,0.55); stroke-width: 0.6; opacity: 0; }
+.ring-tick--major { stroke: rgba(0,240,255,0.85); stroke-width: 0.9; }
+
+/* One-shot wake-word pulse -- see ArcReactor.tsx's wakeFlash effect
+   (anime.js animates scale/opacity directly; base state here is just the
+   at-rest look between pulses). */
+.arc-reactor__pulse {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1.5px solid rgba(0,240,255,0.8);
+  opacity: 0; pointer-events: none;
 }
 
-.arc-reactor__haze {
-  width: clamp(220px, 20vmin, 560px);
-  height: clamp(220px, 20vmin, 560px);
+.arc-reactor__ring-inner {
+  width: 70%;
+  height: 70%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(0,240,255,0.12), transparent 70%);
-  filter: blur(18px);
-  opacity: 0.6;
+  background: #030608;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.holo-text {
+  font-size: clamp(11px, 1.3vmin, 22px);
+  letter-spacing: 4px;
+  color: #9fefff;
+  text-shadow: 0 0 8px #00d8ff, 0 0 16px rgba(0,216,255,0.5);
 }
 
 .arc-reactor__label {
   position: absolute;
-  bottom: 14px;
+  bottom: 76px;
   left: 50%;
   transform: translateX(-50%);
-  color: rgba(0,240,255,0.65);
-  font-family: monospace;
-  font-size: clamp(11px, 1.2vmin, 22px);
+  color: rgba(0,240,255,0.55);
+  font-family: var(--hud-font);
+  font-size: clamp(10px, 1vmin, 18px);
   letter-spacing: 4px;
-  text-shadow: 0 0 10px rgba(0,240,255,0.4);
+  text-shadow: 0 0 10px rgba(0,240,255,0.35);
   z-index: 20;
   pointer-events: none;
 }
 
-.arc-reactor__orbit-rings { width: clamp(420px, 38vmin, 980px); height: clamp(420px, 38vmin, 980px); }
-.arc-reactor__orbit { position: absolute; inset: 0; border-radius: 50%; }
-.arc-reactor__orbit--1 {
-  border: clamp(3px, 0.3vmin, 6px) solid transparent;
-  border-top: clamp(3px, 0.3vmin, 6px) solid #00f0ff;
-  border-right: clamp(3px, 0.3vmin, 6px) solid #00f0ff;
-  box-shadow: 0 0 20px rgba(0,240,255,0.35);
-  animation: orbitCW 12s linear infinite;
-}
-.arc-reactor__orbit--2 {
-  inset: 5%;
-  border: clamp(2px, 0.2vmin, 4px) solid transparent;
-  border-left: clamp(2px, 0.2vmin, 4px) solid #7fdfff;
-  border-bottom: clamp(2px, 0.2vmin, 4px) solid #7fdfff;
-  box-shadow: 0 0 12px rgba(127,223,255,0.3);
-  animation: orbitCCW 8s linear infinite;
-}
-.arc-reactor__orbit--3 {
-  inset: 12%;
-  border: 1px solid rgba(0,240,255,0.3);
-  box-shadow: 0 0 8px rgba(0,240,255,0.2);
-  animation: orbitCW 20s linear infinite;
-}
-@keyframes orbitCW { to { transform: rotate(360deg); } }
-@keyframes orbitCCW { to { transform: rotate(-360deg); } }
-
-.arc-reactor__pulse-ring {
+/* Bottom icon row -- the reference's row of small mode indicators,
+   repurposed here as real widget show/hide toggles rather than pure
+   decoration. */
+.hud-dock {
   position: absolute;
-  top: 50%;
+  bottom: 30px;
   left: 50%;
-  width: clamp(200px, 18vmin, 500px);
-  height: clamp(200px, 18vmin, 500px);
-  border-radius: 50%;
-  border: 1px solid rgba(0,240,255,0.3);
-  animation: pulseRing 2.8s ease-out infinite;
-  pointer-events: none;
-  transform: translate(-50%, -50%);
-}
-@keyframes pulseRing {
-  0% { transform: translate(-50%,-50%) scale(0.6); opacity: 0.6; }
-  100% { transform: translate(-50%,-50%) scale(2.0); opacity: 0; }
-}
-
-.arc-reactor__hologram {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%,-50%);
-  width: clamp(300px, 28vmin, 760px);
-  height: clamp(300px, 28vmin, 760px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-.arc-reactor__core {
-  position: absolute;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 5;
-}
-.arc-reactor__core-shell {
-  position: absolute;
-  width: 60%;
-  height: 60%;
-  inset: 0;
-  margin: auto;
-  border-radius: 50%;
-  border: clamp(2px, 0.2vmin, 4px) solid rgba(0,240,255,0.55);
-  box-shadow: 0 0 20px rgba(0,240,255,0.2), inset 0 0 12px rgba(0,240,255,0.1);
-}
-.arc-reactor__core-inner {
-  position: absolute;
-  width: 47%;
-  height: 47%;
-  inset: 0;
-  margin: auto;
-  border-radius: 50%;
-  background: #000;
-}
-.holo-text {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: clamp(14px, 1.8vmin, 32px);
-  letter-spacing: 5px;
-  color: #66ffff;
-  text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffff;
-}
-
-.hud-background-time {
-  position: absolute;
-  top: 15%;
-  left: 50.5%;
   transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
+  gap: 14px;
+  z-index: 20;
+  padding: 8px 14px;
+}
+/* Small taskbar-style glyph buttons -- one per page, so you can see at a
+   glance what each opens rather than reading a row of unlabeled dots. */
+.hud-dock__icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
   align-items: center;
-  pointer-events: none;
-  z-index: 2;
+  justify-content: center;
+  border: 1px solid rgba(0,240,255,0.22);
+  background: rgba(0,240,255,0.04);
+  color: rgba(0,240,255,0.55);
+  padding: 0;
+  cursor: pointer;
+  transition: color 0.18s cubic-bezier(0.16,1,0.3,1), border-color 0.18s cubic-bezier(0.16,1,0.3,1),
+    background 0.18s cubic-bezier(0.16,1,0.3,1), box-shadow 0.18s cubic-bezier(0.16,1,0.3,1),
+    transform 0.18s cubic-bezier(0.16,1,0.3,1);
 }
-.hud-time {
-  font-family: monospace;
-  font-size: clamp(60px, 8vmin, 180px);
-  letter-spacing: 10px;
-  color: rgba(0,240,255,0.45);
-  text-shadow: 0 0 8px rgba(0,240,255,0.25);
+.hud-dock__icon svg { display: block; }
+.hud-dock__icon:hover {
+  color: rgba(0,240,255,0.9);
+  border-color: rgba(0,240,255,0.55);
+  background: rgba(0,240,255,0.1);
+  transform: translateY(-3px);
 }
-.hud-date {
-  margin-top: clamp(20px, 2vmin, 40px);
-  font-family: monospace;
-  font-size: clamp(20px, 2.2vmin, 46px);
-  letter-spacing: 3px;
-  color: rgba(0,240,255,0.25);
-  text-transform: uppercase;
-}
-
-.hud-corner { position: absolute; width: 40px; height: 40px; opacity: 0.25; pointer-events: none; }
-.hud-corner-tl { top: 15px; left: 15px; border-top: 2px solid #00f0ff; border-left: 2px solid #00f0ff; }
-.hud-corner-tr { top: 15px; right: 15px; border-top: 2px solid #00f0ff; border-right: 2px solid #00f0ff; }
-.hud-corner-bl { bottom: 15px; left: 15px; border-bottom: 2px solid #00f0ff; border-left: 2px solid #00f0ff; }
-.hud-corner-br { bottom: 15px; right: 15px; border-bottom: 2px solid #00f0ff; border-right: 2px solid #00f0ff; }
-
-.hud-scan-line {
-  position: absolute;
-  left: 0;
-  width: 100%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(0,240,255,0.35), transparent);
-  box-shadow: 0 0 8px rgba(0,240,255,0.25);
-  opacity: 0;
-  animation: hudScan 22s linear infinite;
-  pointer-events: none;
-  z-index: 1;
-}
-@keyframes hudScan {
-  0% { top: -10%; opacity: 0; }
-  3% { opacity: 0.18; }
-  97% { opacity: 0.18; }
-  100% { top: 110%; opacity: 0; }
+.hud-dock__icon--on {
+  color: #00d8ff;
+  border-color: #00d8ff;
+  background: rgba(0,216,255,0.14);
+  box-shadow: 0 0 10px rgba(0,216,255,0.5);
 }
 
-/* ── Widget system ─────────────────────────────────────────────────────── */
-.hud-widget {
-  position: fixed;
-  z-index: 100;
-  min-width: 210px;
-  padding: 18px 22px 17px;
-  border-radius: 3px;
-  background: rgba(0,4,12,0.80);
-  border: 1px solid rgba(0,240,255,0.18);
-  box-shadow: 0 0 18px rgba(0,240,255,0.05), inset 0 0 24px rgba(0,0,0,0.5);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  cursor: grab;
-  user-select: none;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
-  animation: widgetPulse 5s ease-in-out infinite;
-}
-.hud-widget::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 12%;
-  right: 12%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(0,240,255,0.42), transparent);
-  pointer-events: none;
-}
-.hud-widget:hover {
-  border-color: rgba(0,240,255,0.33);
-  box-shadow: 0 0 24px rgba(0,240,255,0.09), inset 0 0 24px rgba(0,0,0,0.5);
-}
-.hud-widget__handle {
-  position: absolute;
-  top: 4px;
-  right: 7px;
-  font-size: 9px;
-  opacity: 0.15;
-  color: #00f0ff;
-  letter-spacing: 1px;
-  pointer-events: none;
-  user-select: none;
-}
-@keyframes widgetPulse {
-  0%,100% { box-shadow: 0 0 14px rgba(0,240,255,0.05), inset 0 0 24px rgba(0,0,0,0.5); opacity: 0.88; }
-  50% { box-shadow: 0 0 24px rgba(0,240,255,0.11), inset 0 0 24px rgba(0,0,0,0.5); opacity: 1; }
-}
-
+/* ── Widget content ────────────────────────────────────────────────────── */
+/* No standalone card shell here -- each widget's content (below) now
+   renders straight inside the single focused-page panel (see "Widget
+   detail overlay" further down), never as an always-on floating card of
+   its own. The soft blue "gas" edge-glow that used to belong to that
+   per-widget card now lives on the page panel itself. */
 .w-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
-.w-label { font-family: monospace; font-size: 12px; letter-spacing: 3px; color: rgba(0,240,255,0.55); text-transform: uppercase; }
-.w-sublabel { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.28); }
+.w-label { font-family: var(--hud-font); font-size: 12px; letter-spacing: 3px; color: rgba(0,240,255,0.55); text-transform: uppercase; }
+.w-sublabel { font-family: var(--hud-font); font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.28); }
 .w-divider { height: 1px; background: linear-gradient(90deg,transparent,rgba(0,240,255,0.12),transparent); margin: 10px 0; }
 .w-row { display: flex; align-items: flex-end; gap: 12px; margin: 6px 0; }
 .w-row--bottom { align-items: flex-end; }
 .w-row--spread { justify-content: space-between; align-items: center; }
 .w-stat { display: flex; flex-direction: column; gap: 3px; }
-.w-stat-lbl { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
-.w-stat-val { font-family: monospace; font-size: 15px; letter-spacing: 1px; color: rgba(0,240,255,0.85); }
-.w-error { font-family: monospace; font-size: 12px; letter-spacing: 2px; color: rgba(255,90,90,0.75); display: block; margin-top: 5px; }
-.w-loading { font-family: monospace; font-size: 12px; letter-spacing: 2px; color: rgba(0,240,255,0.4); display: block; margin-top: 5px; animation: wBlink 1.2s ease-in-out infinite; }
-.w-idle { font-family: monospace; font-size: 12px; letter-spacing: 2px; color: rgba(0,240,255,0.35); display: block; margin-top: 5px; }
+.w-stat-lbl { font-family: var(--hud-font); font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
+.w-stat-val { font-family: var(--hud-font); font-size: 15px; letter-spacing: 1px; color: rgba(0,240,255,0.85); }
+.w-error { font-family: var(--hud-font); font-size: 12px; letter-spacing: 2px; color: rgba(255,90,90,0.75); display: block; margin-top: 5px; }
+.w-loading { font-family: var(--hud-font); font-size: 12px; letter-spacing: 2px; color: rgba(0,240,255,0.4); display: block; margin-top: 5px; animation: wBlink 1.2s ease-in-out infinite; }
+.w-idle { font-family: var(--hud-font); font-size: 12px; letter-spacing: 2px; color: rgba(0,240,255,0.35); display: block; margin-top: 5px; }
 @keyframes wBlink { 0%,100%{opacity:0.3;} 50%{opacity:1;} }
 
-.w-temp { font-family: monospace; font-size: 52px; font-weight: 300; letter-spacing: -2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.45); }
+.w-temp { font-family: var(--hud-font); font-size: 52px; font-weight: 300; letter-spacing: -2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.45); }
 .w-cond-block { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; }
-.w-cond { font-family: monospace; font-size: 14px; letter-spacing: 1.5px; color: rgba(0,240,255,0.75); }
-.w-feels { font-family: monospace; font-size: 11px; letter-spacing: 1px; color: rgba(0,240,255,0.38); }
-.w-aqi { font-family: monospace; font-size: 12px; letter-spacing: 1px; }
+.w-cond { font-family: var(--hud-font); font-size: 14px; letter-spacing: 1.5px; color: rgba(0,240,255,0.75); }
+.w-feels { font-family: var(--hud-font); font-size: 11px; letter-spacing: 1px; color: rgba(0,240,255,0.38); }
+.w-aqi { font-family: var(--hud-font); font-size: 12px; letter-spacing: 1px; }
+
+.w-weather-hourly { display: flex; gap: 4px; overflow-x: auto; padding: 4px 0 2px; }
+.w-weather-hourly__col {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  min-width: 46px; padding: 8px 4px; border-radius: 6px; background: rgba(0,240,255,0.03);
+}
+.w-weather-hourly__temp { font-family: var(--hud-font); font-size: 14px; color: rgba(0,240,255,0.9); }
+.w-weather-hourly__precip { font-family: var(--hud-font); font-size: 9px; color: rgba(120,200,255,0.6); }
+.w-weather-daily { display: flex; flex-direction: column; gap: 2px; }
+.w-weather-daily__row {
+  display: grid; grid-template-columns: 56px 1fr 40px 90px; align-items: center; gap: 8px;
+  padding: 7px 4px; border-bottom: 1px solid rgba(0,240,255,0.06);
+  font-family: var(--hud-font); font-size: 11px; letter-spacing: 1px;
+}
+.w-weather-daily__label { color: rgba(0,240,255,0.7); }
+.w-weather-daily__cond { color: rgba(0,240,255,0.45); font-size: 10px; }
+.w-weather-daily__precip { color: rgba(120,200,255,0.55); font-size: 10px; text-align: right; }
+.w-weather-daily__temps { display: flex; gap: 8px; justify-content: flex-end; }
+.w-weather-daily__hi { color: rgba(0,240,255,0.9); }
+.w-weather-daily__lo { color: rgba(0,240,255,0.35); }
 
 .w-fin-connect {
-  font-family: monospace; font-size: 12px; letter-spacing: 1.5px;
+  font-family: var(--hud-font); font-size: 12px; letter-spacing: 1.5px;
   background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.35);
   color: rgba(0,240,255,0.85); padding: 10px 12px; border-radius: 3px;
   cursor: pointer; width: 100%; text-align: center;
 }
 .w-fin-connect:hover { background: rgba(0,240,255,0.16); }
 .w-fin-connect:disabled { opacity: 0.5; cursor: default; }
+.w-row .w-fin-connect { width: auto; flex: 1; }
 .w-fin-disconnect {
-  font-family: monospace; font-size: 10px; letter-spacing: 1.5px;
+  font-family: var(--hud-font); font-size: 10px; letter-spacing: 1.5px;
   background: transparent; border: none; color: rgba(255,90,90,0.55);
   cursor: pointer; padding: 0; text-align: left;
 }
 .w-fin-disconnect:hover { color: rgba(255,90,90,0.85); }
 
 .w-clock-row { margin: 6px 0 4px; }
-.w-clock { font-family: monospace; font-size: 40px; font-weight: 300; letter-spacing: 2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.4); }
-.w-weekday { font-family: monospace; font-size: 12px; letter-spacing: 3px; color: rgba(0,240,255,0.65); margin-top: 5px; }
-.w-date { font-family: monospace; font-size: 11px; letter-spacing: 2px; color: rgba(0,240,255,0.38); margin-top: 3px; }
+.w-clock { font-family: var(--hud-font); font-size: 40px; font-weight: 300; letter-spacing: 2px; line-height: 1; color: rgba(0,240,255,0.95); text-shadow: 0 0 22px rgba(0,240,255,0.4); }
+.w-weekday { font-family: var(--hud-font); font-size: 12px; letter-spacing: 3px; color: rgba(0,240,255,0.65); margin-top: 5px; }
+.w-date { font-family: var(--hud-font); font-size: 11px; letter-spacing: 2px; color: rgba(0,240,255,0.38); margin-top: 3px; }
+.w-time-world { display: flex; flex-direction: column; gap: 2px; }
+.w-time-world__row {
+  display: flex; justify-content: space-between; padding: 6px 2px; border-bottom: 1px solid rgba(0,240,255,0.06);
+  font-family: var(--hud-font); font-size: 12px; letter-spacing: 1.5px;
+}
+.w-time-world__label { color: rgba(0,240,255,0.55); }
+.w-time-world__val { color: rgba(0,240,255,0.85); }
+
+/* ── Homelab rack rendering (real 3D model of the physical rack) ───────── */
+.w-rack-layout { display: flex; flex-direction: column; gap: 20px; }
+.w-rack-stage { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; }
+.w-rack-controls { display: flex; gap: 8px; align-items: center; }
+.w-rack-chip {
+  background: rgba(0,240,255,0.06); border: 1px solid rgba(0,240,255,0.25); color: rgba(0,240,255,0.75);
+  font-family: var(--hud-font); font-size: 9px; letter-spacing: 1.5px; padding: 5px 11px;
+  border-radius: 12px; cursor: pointer; transition: background 0.15s ease;
+}
+.w-rack-chip:hover { background: rgba(0,240,255,0.14); }
+.w-rack-chip--hint { cursor: default; color: rgba(0,240,255,0.3); border-color: rgba(0,240,255,0.1); background: transparent; }
+.w-rack-chip--hint:hover { background: transparent; }
+
+/* Floating labels on exploded 3D parts (Explodable.tsx) -- drei's Html,
+   so real DOM text (crisp at any zoom, no troika/3D-text dependency). */
+.explode-label {
+  font-family: var(--hud-font); font-size: 10px; letter-spacing: 1px; white-space: nowrap;
+  color: rgba(0,240,255,0.95); background: rgba(0,8,16,0.75); border: 1px solid rgba(0,240,255,0.3);
+  border-radius: 4px; padding: 3px 8px; text-shadow: 0 0 6px rgba(0,240,255,0.5);
+}
+
+/* The model itself is now the dominant element on the page -- centered,
+   large by default (not squeezed beside callout columns the way the
+   earlier version was), with EXPAND pushing it larger still. */
+.w-rack__canvas3d {
+  position: relative;
+  width: min(560px, 92%);
+  height: min(58vh, 640px);
+  cursor: grab;
+  touch-action: none;
+  filter: drop-shadow(0 0 20px rgba(0,200,255,0.12));
+  transition: width 0.3s cubic-bezier(0.16,1,0.3,1), height 0.3s cubic-bezier(0.16,1,0.3,1);
+}
+.w-rack__canvas3d:active { cursor: grabbing; }
+.w-rack__canvas3d canvas { display: block; outline: none; }
+.w-rack__canvas3d--expanded { width: min(760px, 96%); height: min(74vh, 820px); }
+.w-rack__callouts-row {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 34px;
+}
+.w-rack__callout { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+
+.w-rack-detail {
+  display: flex; flex-direction: column; gap: 6px;
+  width: 100%;
+  padding: 16px 20px; margin-top: 4px;
+  background: rgba(0,240,255,0.03); border: 1px solid rgba(0,240,255,0.16); border-radius: 6px;
+  animation: rackDetailIn 0.28s cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes rackDetailIn {
+  0% { opacity: 0; transform: translateY(-8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.w-rack-detail__title {
+  font-family: var(--hud-font); font-size: 11px; letter-spacing: 2.5px; color: rgba(0,240,255,0.75);
+  margin-bottom: 4px;
+}
+.w-rack-detail__list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; margin: 4px 0; }
+.w-rack-detail__row {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  font-family: var(--hud-font); font-size: 10px; letter-spacing: 0.5px; color: rgba(0,240,255,0.55);
+  padding: 3px 0;
+}
+.w-rack-detail__device { border-bottom: 1px solid rgba(0,240,255,0.06); padding-bottom: 4px; }
+.w-rack-detail__scan-btn {
+  background: rgba(0,240,255,0.06); border: 1px solid rgba(0,240,255,0.25); color: rgba(0,240,255,0.7);
+  font-family: var(--hud-font); font-size: 8px; letter-spacing: 1px; padding: 4px 8px;
+  border-radius: 3px; cursor: pointer; flex-shrink: 0;
+}
+.w-rack-detail__scan-btn:hover { background: rgba(0,240,255,0.16); }
+.w-rack-detail__scan-btn:disabled { opacity: 0.5; cursor: default; }
+.w-rack-detail__hostname { font-family: var(--hud-font); font-size: 9.5px; letter-spacing: 0.5px; color: rgba(0,240,255,0.5); padding: 2px 0; }
+.w-rack-detail__ports { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 0 8px; }
+.w-rack-detail__port-chip {
+  font-family: var(--hud-font); font-size: 9px; letter-spacing: 0.5px; color: rgba(120,240,180,0.85);
+  background: rgba(53,240,160,0.08); border: 1px solid rgba(53,240,160,0.25);
+  padding: 3px 7px; border-radius: 10px;
+}
+.w-stat-val--warn { color: #ffb84b; }
+.w-stat-val--bad { color: #ff5a46; }
 
 /* ── Jarvis console ────────────────────────────────────────────────────── */
 .w-jarvis-console { display: flex; flex-direction: column; gap: 8px; min-width: 280px; max-width: 340px; }
@@ -367,100 +401,113 @@ html, body, #root {
 .w-jc-dot--on { background: #00f0ff; box-shadow: 0 0 6px #00f0ff; animation: jcPulse 2.5s ease-in-out infinite; }
 .w-jc-dot--off { background: rgba(255,80,60,0.6); box-shadow: 0 0 4px rgba(255,80,60,0.4); }
 @keyframes jcPulse { 0%,100% { box-shadow: 0 0 3px #00f0ff; } 50% { box-shadow: 0 0 10px #00f0ff; opacity: 0.8; } }
-.w-jc-status { font-family: monospace; font-size: 14px; letter-spacing: 2px; color: rgba(0,240,255,0.85); text-shadow: 0 0 8px rgba(0,240,255,0.35); margin-bottom: 3px; }
+.w-jc-status { font-family: var(--hud-font); font-size: 14px; letter-spacing: 2px; color: rgba(0,240,255,0.85); text-shadow: 0 0 8px rgba(0,240,255,0.35); margin-bottom: 3px; }
 .w-jc-log { display: flex; flex-direction: column; gap: 8px; max-height: 210px; overflow-y: auto; padding-right: 3px; }
 .w-jc-log::-webkit-scrollbar { width: 4px; }
 .w-jc-log::-webkit-scrollbar-thumb { background: rgba(0,240,255,0.18); border-radius: 2px; }
 .w-jc-row { display: flex; flex-direction: column; gap: 1px; animation: jcRowIn 0.18s ease-out; }
 @keyframes jcRowIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
-.w-jc-tag { font-family: monospace; font-size: 9px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
-.w-jc-text { font-family: monospace; font-size: 12px; letter-spacing: 0.5px; color: rgba(0,240,255,0.75); line-height: 1.4; word-break: break-word; }
+.w-jc-tag { font-family: var(--hud-font); font-size: 9px; letter-spacing: 2px; color: rgba(0,240,255,0.35); }
+.w-jc-text { font-family: var(--hud-font); font-size: 12px; letter-spacing: 0.5px; color: rgba(0,240,255,0.75); line-height: 1.4; word-break: break-word; }
 .w-jc-row--activity .w-jc-tag, .w-jc-row--activity .w-jc-text { color: rgba(0,240,255,0.45); font-style: italic; }
 
-/* ── Status-driven reactor coloring ───────────────────────────────────── */
-.arc-reactor[data-status="speaking"] .arc-reactor__orb { animation: jarvisSpeakingPulse 0.6s ease-in-out infinite; }
-@keyframes jarvisSpeakingPulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.5); } }
-.arc-reactor[data-status="listening"] .arc-reactor__orb { border-color: rgba(255,215,0,0.7); }
-.arc-reactor[data-status="processing"] .arc-reactor__orb { border-color: rgba(255,140,0,0.7); }
+/* ── Vision widget (phone camera Q&A, mirrored live from /hud) ─────────── */
+.w-vision { display: flex; flex-direction: column; gap: 8px; min-width: 280px; max-width: 340px; }
+.w-vision-log { display: flex; flex-direction: column; gap: 10px; max-height: 220px; overflow-y: auto; padding-right: 3px; }
+.w-vision-log::-webkit-scrollbar { width: 4px; }
+.w-vision-log::-webkit-scrollbar-thumb { background: rgba(0,240,255,0.18); border-radius: 2px; }
+.w-vision-row { display: flex; flex-direction: column; gap: 4px; animation: jcRowIn 0.18s ease-out; padding-bottom: 8px; border-bottom: 1px solid rgba(0,240,255,0.08); }
+.w-vision-row:last-child { border-bottom: none; padding-bottom: 0; }
+.w-vision-q { font-family: var(--hud-font); font-size: 11px; letter-spacing: 0.5px; color: rgba(0,240,255,0.5); line-height: 1.4; }
+.w-vision-a { font-family: var(--hud-font); font-size: 12px; letter-spacing: 0.5px; color: rgba(0,240,255,0.88); line-height: 1.45; word-break: break-word; }
 
-.arc-reactor--wake-flash { animation: wakeFlash 0.4s ease-out; }
+/* ── Camera feed widget (live mirror of the phone HUD's camera) ────────── */
+.w-camerafeed { display: flex; flex-direction: column; gap: 10px; width: 260px; }
+.w-camerafeed-frame {
+  position: relative; width: 100%; aspect-ratio: 4/3; border-radius: 6px; overflow: hidden;
+  background: rgba(0,0,0,0.35); border: 1px solid rgba(0,240,255,0.14);
+  display: flex; align-items: center; justify-content: center;
+}
+.w-camerafeed-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.w-camerafeed-frame .w-idle { margin: 0; padding: 0 14px; text-align: center; font-size: 10.5px; }
+.w-camerafeed-live {
+  position: absolute; top: 6px; right: 6px; font-family: var(--hud-font); font-size: 9px;
+  letter-spacing: 1.5px; color: #ff6a78; background: rgba(0,0,0,0.55);
+  padding: 2px 7px; border-radius: 3px; border: 1px solid rgba(255,90,70,0.4);
+  animation: liveBlink 1.4s ease-in-out infinite;
+}
+@keyframes liveBlink { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* ── Status-driven reactor coloring ───────────────────────────────────── */
+/* data-status is always lowercased in ArcReactor.tsx now; substring
+   matches (*=) absorb jarvis.py's freeform variants ("Processing",
+   "Processing (offline)", "Thinking", ...) without needing exact strings. */
+.arc-reactor[data-status="speaking"] .arc-reactor__ring { animation: jarvisSpeakingPulse 0.6s ease-in-out infinite; border-color: rgba(0,240,255,0.85); }
+@keyframes jarvisSpeakingPulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.5); } }
+.arc-reactor[data-status="listening"] .arc-reactor__ring { border-color: rgba(255,215,0,0.6); }
+.arc-reactor[data-status*="process"] .arc-reactor__ring,
+.arc-reactor[data-status*="think"] .arc-reactor__ring {
+  border-color: rgba(255,140,0,0.65);
+  /* thinkingRingPulse only touches `filter`, so it composes fine with the
+     base rule's `transform` (self-centering translate + the JS-driven
+     --core-scale pulse). ringSpin does NOT belong here too: it animates
+     `transform: rotate(...)`, which would fully replace -- not add to --
+     that base transform for as long as this animation runs, snapping the
+     ring off-center and killing its audio-reactive scale every 1.1s. The
+     rotating highlight arc already spins independently via the ::after
+     rule right below, which has no competing transform to clash with. */
+  animation: thinkingRingPulse 1.1s ease-in-out infinite;
+}
+.arc-reactor[data-status*="process"] .arc-reactor__ring::after,
+.arc-reactor[data-status*="think"] .arc-reactor__ring::after {
+  background: conic-gradient(from 0deg, transparent 0deg, transparent 250deg, #ffa64b 300deg, #ffd9a8 335deg, transparent 358deg);
+  animation: ringSpin 1.1s linear infinite;
+}
+@keyframes thinkingRingPulse { 0%, 100% { filter: brightness(1) saturate(1); } 50% { filter: brightness(1.3) saturate(1.4); } }
+
+/* Compound selector (higher specificity than plain .arc-reactor) so this
+   reliably wins over the ambient hudFlicker animation below regardless of
+   stylesheet order -- both are declared together here since two separate
+   rules setting the `animation` shorthand on the same element don't merge,
+   the later one simply replaces the earlier one entirely. */
+.arc-reactor.arc-reactor--wake-flash { animation: wakeFlash 0.4s ease-out, hudFlicker 14s ease-in-out infinite; }
 @keyframes wakeFlash { 0% { filter: brightness(1); } 30% { filter: brightness(2.2); } 100% { filter: brightness(1); } }
 
-/* ── Context menu ──────────────────────────────────────────────────────── */
-.ctx-menu {
-  position: fixed;
-  z-index: 99999;
-  min-width: 192px;
-  padding: 8px 0;
-  background: rgba(0, 4, 14, 0.97);
-  border: 1px solid rgba(0, 240, 255, 0.22);
-  border-radius: 2px;
-  box-shadow: 0 0 0 1px rgba(0, 240, 255, 0.04), 0 0 32px rgba(0, 240, 255, 0.08), 0 12px 40px rgba(0, 0, 0, 0.75), inset 0 0 24px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  user-select: none;
-  animation: ctxFadeIn 0.13s ease-out;
-}
-@keyframes ctxFadeIn { from { opacity: 0; transform: translateY(-5px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
-.ctx-menu__title { font-family: monospace; font-size: 8px; letter-spacing: 3px; color: rgba(0, 240, 255, 0.32); padding: 7px 14px 9px; border-bottom: 1px solid rgba(0, 240, 255, 0.07); text-transform: uppercase; pointer-events: none; }
-.ctx-menu__item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 14px; background: transparent; border: none; color: rgba(0, 240, 255, 0.70); font-family: monospace; font-size: 10px; letter-spacing: 2px; cursor: pointer; text-align: left; transition: background 0.10s ease, color 0.10s ease, text-shadow 0.10s ease; box-sizing: border-box; }
-.ctx-menu__item:hover { background: rgba(0, 240, 255, 0.07); color: rgba(0, 240, 255, 1); text-shadow: 0 0 9px rgba(0, 240, 255, 0.38); }
-.ctx-menu__item--danger { color: rgba(255, 100, 80, 0.70); }
-.ctx-menu__item--danger:hover { background: rgba(255, 70, 50, 0.07); color: rgba(255, 120, 100, 1); text-shadow: 0 0 9px rgba(255, 80, 60, 0.40); }
-.ctx-menu__item--restore { color: rgba(0, 230, 160, 0.70); }
-.ctx-menu__item--restore:hover { background: rgba(0, 230, 160, 0.07); color: rgba(0, 255, 180, 1); text-shadow: 0 0 9px rgba(0, 230, 160, 0.40); }
-.ctx-menu__item--disabled { color: rgba(0, 240, 255, 0.20); cursor: default; }
-.ctx-menu__item--disabled:hover { background: transparent; color: rgba(0, 240, 255, 0.20); text-shadow: none; }
-.ctx-menu__icon { font-size: 11px; flex-shrink: 0; width: 14px; text-align: center; opacity: 0.8; }
-
-/* ── Widget show/hide transitions ─────────────────────────────────────── */
-.hud-widget--enter { animation: widgetEnter 0.28s cubic-bezier(0.16,1,0.3,1) both, widgetPulse 5s ease-in-out infinite 0.28s; }
-.hud-widget--exit { animation: widgetExit 0.2s ease-in forwards; pointer-events: none; }
-@keyframes widgetEnter {
-  0% { opacity: 0; transform: scale(0.92) translateY(6px); filter: blur(3px); }
-  100% { opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }
-}
-@keyframes widgetExit {
-  0% { opacity: 1; transform: scale(1); }
-  100% { opacity: 0; transform: scale(0.94); }
-}
-
 /* ── Creation panel (Jarvis "creator mode" reveal) ────────────────────── */
+/* Full-window takeover, same as HudPage -- not a floating card, so a
+   built website/dashboard reads as "Jarvis just built this right here"
+   rather than a popup on top of the HUD. */
 .creation-panel {
   position: fixed;
-  top: 8%;
-  left: 50%;
-  width: min(860px, 82vw);
-  height: min(620px, 74vh);
-  background: rgba(0,4,12,0.94);
-  border: 1px solid rgba(0,240,255,0.28);
-  border-radius: 4px;
-  box-shadow: 0 0 40px rgba(0,240,255,0.12), 0 20px 60px rgba(0,0,0,0.6), inset 0 0 30px rgba(0,0,0,0.5);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  z-index: 5000;
+  inset: 0;
+  background: rgba(0,3,8,0.94);
+  z-index: 7500;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: creationReveal 0.42s cubic-bezier(0.16,1,0.3,1);
+  animation: creationReveal 0.5s cubic-bezier(0.16,1,0.3,1) both;
 }
 @keyframes creationReveal {
-  0% { opacity: 0; transform: translate(-50%, 0) scale(0.9); filter: blur(6px); }
-  100% { opacity: 1; transform: translate(-50%, 0) scale(1); filter: blur(0); }
+  0% { opacity: 0; clip-path: circle(0% at 50% 92%); }
+  100% { opacity: 1; clip-path: circle(150% at 50% 92%); }
 }
 .creation-panel__bar {
   display: flex; align-items: center; justify-content: space-between;
   padding: 10px 14px; border-bottom: 1px solid rgba(0,240,255,0.15);
   background: rgba(0,240,255,0.04); flex-shrink: 0;
 }
-.creation-panel__title { font-family: monospace; font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.7); text-transform: uppercase; }
+.creation-panel__title { font-family: var(--hud-font); font-size: 10px; letter-spacing: 2px; color: rgba(0,240,255,0.7); text-transform: uppercase; }
 .creation-panel__actions { display: flex; gap: 6px; }
 .creation-panel__actions button {
   background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.2);
   color: rgba(0,240,255,0.75); width: 24px; height: 22px; border-radius: 3px;
-  cursor: pointer; font-family: monospace; font-size: 12px; line-height: 1;
+  cursor: pointer; font-family: var(--hud-font); font-size: 12px; line-height: 1;
 }
 .creation-panel__actions button:hover { background: rgba(0,240,255,0.18); color: #fff; }
+.creation-panel__no-link {
+  opacity: 0.4; cursor: not-allowed !important;
+}
+.creation-panel__no-link:hover { background: rgba(0,240,255,0.08) !important; color: rgba(0,240,255,0.75) !important; }
 .creation-panel__scan {
   position: absolute; left: 0; width: 100%; height: 2px; top: 44px;
   background: linear-gradient(90deg, transparent, rgba(0,240,255,0.7), transparent);
@@ -469,3 +516,414 @@ html, body, #root {
 }
 @keyframes creationScan { 0% { top: 44px; opacity: 1; } 100% { top: 100%; opacity: 0; } }
 .creation-panel__frame { flex: 1; border: none; width: 100%; background: #0a0a12; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   V2 -- sleeker HUD pass: ambient particles, boot sequence, hex grid,
+   radar sweep, tick ring, live corner readouts, widget polish, glitch.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.hud-particles {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  width: 100%;
+  height: 100%;
+}
+
+/* Idle-screen ambient background (AuroraField) -- sits inside .arc-reactor
+   (relative), painted after its ::before glow but before the ring/dock/
+   grid, same layering .hud-particles uses for HudPage. */
+.hud-aurora {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+/* ── Boot sequence (mount only) ───────────────────────────────────────── */
+/* arc-reactor__ring's `transform` is continuously driven by JS
+   (--core-scale, updated every frame in ArcReactor.tsx) and its own
+   status-driven rules (see above) can also touch `animation` -- an
+   opacity-only boot-in avoids fighting either of those. */
+.arc-reactor__ring { animation: ringBootFade 0.9s ease-out 0.15s both; }
+@keyframes ringBootFade { from { opacity: 0; } to { opacity: 1; } }
+
+.holo-text { animation: holoTextIn 0.5s ease-out 0.5s both; }
+@keyframes holoTextIn { from { opacity: 0; letter-spacing: 14px; } to { opacity: 1; letter-spacing: 5px; } }
+
+.hud-dock { animation: dockBootIn 0.6s ease-out 0.4s both; }
+@keyframes dockBootIn { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ── Occasional subtle hologram flicker (whole HUD, very rare/brief) ──── */
+.arc-reactor { animation: hudFlicker 14s ease-in-out infinite; }
+@keyframes hudFlicker {
+  0%, 96.5%, 98%, 100% { filter: brightness(1); }
+  97% { filter: brightness(1.08) contrast(1.05); }
+  97.4% { filter: brightness(0.92); }
+}
+
+/* ── Mute toggle (titlebar) ───────────────────────────────────────────── */
+.hud-mute-btn {
+  background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.2);
+  border-radius: 3px; color: rgba(0,240,255,0.6); width: 28px; height: 20px;
+  cursor: pointer; font-size: 11px; font-family: var(--hud-font);
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.hud-mute-btn:hover { background: rgba(0,240,255,0.18); color: #fff; }
+.hud-mute-btn--muted { color: rgba(255,90,70,0.7); border-color: rgba(255,90,70,0.3); }
+
+/* ── Reduced motion: cut ambient/looping animation, keep functional cues ── */
+@media (prefers-reduced-motion: reduce) {
+  .hud-particles { display: none; }
+  .arc-reactor, .arc-reactor__ring::after { animation: none !important; }
+  /* .hud-page's open/close/switch transition is Motion-driven (HudPage.tsx)
+     and already checks prefers-reduced-motion itself -- nothing to cut here. */
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Camera focus flow -- the phone's live camera taking over full-screen,
+   with the arc reactor fading to a small corner badge to get out of the
+   way (see cameraFocusActive in ArcReactor.tsx).
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.camera-focus {
+  position: fixed;
+  inset: 0;
+  z-index: 7000;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  animation: cameraFocusIn 0.55s cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes cameraFocusIn {
+  0% { opacity: 0; clip-path: circle(0% at 92% 92%); }
+  100% { opacity: 1; clip-path: circle(150% at 92% 92%); }
+}
+.camera-focus--closing {
+  animation: cameraFocusOut 0.4s cubic-bezier(0.7,0,0.84,0) forwards;
+  pointer-events: none;
+}
+@keyframes cameraFocusOut {
+  0% { opacity: 1; clip-path: circle(150% at 92% 92%); }
+  100% { opacity: 0; clip-path: circle(0% at 92% 92%); }
+}
+.camera-focus__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.camera-focus__vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.65) 100%);
+}
+
+/* Small ring badge -- same look as the idle-state ring, just small,
+   tucked in a corner so it doesn't cover the feed. Doubles as the
+   minimize control. Shared visual language with .camera-live-badge
+   below (the same badge, just for the "minimized while camera is still
+   live" state instead of sitting on top of the full-screen feed). */
+.camera-focus__badge {
+  position: absolute; bottom: 28px; right: 28px;
+  background: transparent; border: none; padding: 0; cursor: pointer;
+  animation: badgeFlowIn 0.5s cubic-bezier(0.16,1,0.3,1) both;
+}
+.camera-focus__badge-ring, .camera-live-badge__ring {
+  display: flex; align-items: center; justify-content: center;
+  width: 64px; height: 64px; border-radius: 50%;
+  border: 2px solid rgba(0,240,255,0.55);
+  background: rgba(0,4,12,0.55);
+  box-shadow: 0 0 16px rgba(0,240,255,0.3), 0 0 32px rgba(0,240,255,0.12);
+  backdrop-filter: blur(6px);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.camera-focus__badge:hover .camera-focus__badge-ring,
+.camera-live-badge:hover .camera-live-badge__ring {
+  border-color: rgba(0,240,255,0.85); box-shadow: 0 0 22px rgba(0,240,255,0.5);
+}
+.camera-focus__badge-text, .camera-live-badge__text {
+  font-family: var(--hud-font); font-size: 7px; letter-spacing: 1.5px;
+  color: #9fefff; text-shadow: 0 0 6px #00d8ff;
+}
+
+/* Floating minimized badge -- shown when the camera is live but focus
+   mode has been dismissed back to the normal dashboard. Clicking it
+   re-enters full-screen. This IS the "logo flows and minimizes to the
+   bottom right" element from the reference. */
+.camera-live-badge {
+  position: fixed; bottom: 24px; right: 24px; z-index: 6500;
+  background: transparent; border: none; padding: 0; cursor: pointer;
+  animation: badgeFlowIn 0.5s cubic-bezier(0.16,1,0.3,1) both;
+}
+@keyframes badgeFlowIn {
+  0% { opacity: 0; transform: scale(0.5) translate(20px, 20px); }
+  100% { opacity: 1; transform: scale(1) translate(0, 0); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   HUD page -- tap a dock icon, its content flows to fill the whole
+   window (same iris-wipe language as the camera takeover below), not a
+   bordered card floating over a dimmed backdrop. See HudPage.tsx.
+   ═══════════════════════════════════════════════════════════════════════ */
+.hud-page {
+  position: fixed;
+  inset: 0;
+  z-index: 8000;
+  display: flex;
+  flex-direction: column;
+  background: radial-gradient(ellipse 70% 60% at 50% 36%, rgba(4,18,30,0.5), rgba(0,3,8,0.9) 78%);
+  padding: 56px clamp(24px, 6vw, 96px) 40px;
+  overflow-y: auto;
+  /* Open/close/switch iris-wipe (clip-path) is driven by Motion in
+     HudPage.tsx now, not a CSS @keyframes -- see that file for why
+     (interruptible re-triggering on origin change, which a CSS animation
+     can't do just from a custom-property change). */
+}
+/* Mirrors the entrance (iris closing back down toward the origin point)
+   rather than just vanishing -- ArcReactor.tsx keeps this mounted for
+   exactly this animation's duration (420ms) before actually clearing it. */
+.hud-page--closing {
+  pointer-events: none;
+}
+.hud-page__glow {
+  position: fixed;
+  inset: -20%;
+  z-index: -1;
+  background: conic-gradient(from 0deg, rgba(0,240,255,0.05), transparent 30%, transparent 70%, rgba(0,240,255,0.05));
+  animation: detailGlowSpin 18s linear infinite;
+  pointer-events: none;
+}
+@keyframes detailGlowSpin { to { transform: rotate(360deg); } }
+.hud-page__header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 28px; padding-bottom: 16px; border-bottom: 1px solid rgba(0,240,255,0.14);
+  flex-shrink: 0;
+}
+.hud-page__title {
+  font-family: var(--hud-font); font-size: 15px; letter-spacing: 5px; color: rgba(0,240,255,0.85);
+  text-transform: uppercase; text-shadow: 0 0 14px rgba(0,240,255,0.45);
+}
+.hud-page__close {
+  background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.25); color: rgba(0,240,255,0.75);
+  width: 32px; height: 32px; border-radius: 50%; cursor: pointer; font-family: var(--hud-font); font-size: 14px;
+  flex-shrink: 0;
+}
+.hud-page__close:hover { background: rgba(0,240,255,0.18); color: #fff; }
+.hud-page__body {
+  flex: 1;
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding-bottom: 60px;
+}
+/* Full-bleed variant -- the content IS the window, edge to edge, no
+   padded column and no header bar (see fullBleed in HudPage.tsx). */
+.hud-page--full-bleed { padding: 0; background: transparent; }
+.hud-page__body--full-bleed { width: 100%; margin: 0; padding: 0; }
+.hud-page__ticker {
+  position: absolute; top: 10px; left: 0; right: 0; height: 1px;
+  z-index: 20; pointer-events: none;
+}
+.hud-page__ticker::before {
+  content: ""; position: absolute; left: 10%; right: 10%; top: 0; height: 1px;
+  background: repeating-linear-gradient(90deg, rgba(0,240,255,0.4) 0 1px, transparent 1px 26px);
+}
+.hud-page__body .w-jarvis-console,
+.hud-page__body .w-vision,
+.hud-page__body .w-camerafeed {
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+}
+.hud-page__body .w-camerafeed-frame { max-width: 480px; }
+/* These logs were sized (220/210px) for the old small floating-card
+   widgets -- give them real room now that they live in a full page. */
+.hud-page__body .w-vision-log,
+.hud-page__body .w-jc-log { max-height: 58vh; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Hand-gesture cursor -- follows the phone's MediaPipe-tracked hand
+   position (see jarvis_hud.html + ArcReactor.tsx's 'hand_gesture' WS
+   handling). Fixed + centered on its own coordinate via translate so
+   `left`/`top` can just be the raw cursor point.
+   ═══════════════════════════════════════════════════════════════════════ */
+.gesture-cursor {
+  position: fixed;
+  z-index: 9000;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 2px solid rgba(0,240,255,0.55);
+  background: rgba(0,240,255,0.08);
+  box-shadow: 0 0 18px rgba(0,240,255,0.35);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: width 0.12s ease, height 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.gesture-cursor--pinching {
+  width: 30px;
+  height: 30px;
+  background: rgba(0,240,255,0.28);
+  border-color: rgba(0,240,255,0.9);
+  box-shadow: 0 0 24px rgba(0,240,255,0.6);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Map widget -- real embedded Leaflet map (OpenStreetMap tiles, free, no
+   API key) with an optional live precipitation-radar overlay (RainViewer,
+   also free/keyless). Voice-triggered via tools.py's show_map /
+   show_weather_radar -> bot_events -> jarvis.py -> this widget's WS
+   handling in ArcReactor.tsx; the in-widget RADAR/MAP button does the
+   same thing locally. Retheme Leaflet's own light-mode chrome (zoom
+   buttons, attribution bar) below rather than leave its default white
+   UI clashing with the rest of the HUD.
+   ═══════════════════════════════════════════════════════════════════════ */
+.w-map { display: flex; flex-direction: column; gap: 8px; width: 380px; }
+.w-map__toggle {
+  background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.3);
+  color: rgba(0,240,255,0.85); font-family: var(--hud-font); font-size: 9px;
+  letter-spacing: 1.5px; padding: 4px 11px; border-radius: 12px; cursor: pointer;
+}
+.w-map__toggle:hover { background: rgba(0,240,255,0.2); }
+.w-map__location {
+  font-family: var(--hud-font); font-size: 15px; letter-spacing: 1.5px;
+  color: rgba(0,240,255,0.9); text-transform: uppercase; text-shadow: 0 0 10px rgba(0,240,255,0.4);
+}
+.w-map__canvas {
+  position: relative; width: 100%; height: 240px; border-radius: 8px;
+  overflow: hidden; border: 1px solid rgba(0,240,255,0.16);
+}
+/* Full-bleed presentation for the map's own HUD page (as opposed to the
+   compact width above, still used if this is ever embedded elsewhere) --
+   the canvas fills essentially the whole page rather than sitting in a
+   small card, and the location/toggle become floating HUD chips over the
+   map itself instead of a header row above it. */
+/* Always rendered edge-to-edge now (map is the one fullBleed HudPage) --
+   the canvas fills the entire window, no rounded card floating in a
+   padded page, matching the reference's "map IS the screen" look. */
+.w-map--full { width: 100%; height: 100%; display: flex; flex-direction: column; }
+.w-map--full .w-map__canvas { flex: 1; height: 100%; border-radius: 0; }
+.w-map__overlay-label {
+  position: absolute; top: 32px; left: 20px; z-index: 500;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 10px 16px; border-radius: 6px;
+  background: rgba(0,6,14,0.55); border: 1px solid rgba(0,240,255,0.18);
+  backdrop-filter: blur(6px); pointer-events: none;
+}
+.w-map__toggle--float {
+  position: absolute; top: 32px; right: 20px; z-index: 500;
+  backdrop-filter: blur(6px);
+}
+.w-map__loading {
+  position: absolute; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,10,20,0.55); font-family: var(--hud-font); font-size: 10px;
+  letter-spacing: 2px; color: rgba(0,240,255,0.85); pointer-events: none;
+}
+
+/* Address search -- top-center, between the location chip (top-left) and
+   RADAR/STREET VIEW toggles (top-right) so it doesn't compete with either. */
+.w-map__search {
+  position: absolute; top: 32px; left: 50%; transform: translateX(-50%); z-index: 501;
+  width: min(340px, 40vw);
+}
+.w-map__search-input {
+  width: 100%; font-family: var(--hud-font); font-size: 12px; letter-spacing: 0.5px;
+  color: rgba(0,240,255,0.95); background: rgba(0,6,14,0.6); border: 1px solid rgba(0,240,255,0.25);
+  border-radius: 6px; padding: 10px 14px; backdrop-filter: blur(6px); outline: none;
+}
+.w-map__search-input::placeholder { color: rgba(0,240,255,0.4); }
+.w-map__search-input:focus { border-color: rgba(0,240,255,0.6); }
+.w-map__search-spinner {
+  position: absolute; top: 50%; right: 12px; transform: translateY(-50%);
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid rgba(0,240,255,0.25); border-top-color: rgba(0,240,255,0.9);
+  animation: mapSearchSpin 0.7s linear infinite;
+}
+@keyframes mapSearchSpin { to { transform: translateY(-50%) rotate(360deg); } }
+.w-map__search-results {
+  margin-top: 6px; max-height: 220px; overflow-y: auto;
+  background: rgba(0,6,14,0.85); border: 1px solid rgba(0,240,255,0.25);
+  border-radius: 6px; backdrop-filter: blur(6px);
+}
+.w-map__search-result {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  border-bottom: 1px solid rgba(0,240,255,0.1); color: rgba(220,245,255,0.85);
+  font-family: var(--hud-font); font-size: 11px; line-height: 1.4;
+  padding: 9px 12px; cursor: pointer;
+}
+.w-map__search-result:last-child { border-bottom: none; }
+.w-map__search-result:hover { background: rgba(0,240,255,0.12); color: #fff; }
+
+/* Second floating toggle, stacked under RADAR (both top:32px/right:20px
+   would overlap otherwise). */
+.w-map__toggle--street { top: 70px; }
+
+/* Street-level imagery panel (Mapillary) -- an overlay within the map
+   page, same chrome language as the radar loading state, not a separate
+   HudPage (staying inside the map keeps the search box/marker context
+   visible underneath when closed). */
+.w-map__street-view {
+  position: absolute; inset: 16px; z-index: 900; border-radius: 8px; overflow: hidden;
+  background: #030608; border: 1px solid rgba(0,240,255,0.3);
+  box-shadow: 0 0 40px rgba(0,240,255,0.15);
+  display: flex; flex-direction: column;
+}
+.w-map__street-view-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: rgba(0,10,20,0.85); border-bottom: 1px solid rgba(0,240,255,0.2);
+  flex-shrink: 0;
+}
+.w-map__street-view-close {
+  background: none; border: none; color: rgba(0,240,255,0.7); font-size: 16px; cursor: pointer; padding: 2px 8px;
+}
+.w-map__street-view-close:hover { color: #fff; }
+.w-map__street-view-canvas { flex: 1; position: relative; background: #000; }
+.w-map__street-view-error {
+  position: absolute; inset: 0; top: 45px; z-index: 10; display: flex; align-items: center; justify-content: center;
+  padding: 24px; text-align: center; background: rgba(0,6,14,0.9);
+  font-family: var(--hud-font); font-size: 12px; letter-spacing: 0.5px; line-height: 1.6;
+  color: rgba(255,180,80,0.85);
+}
+.map-widget__marker-dot {
+  position: relative; z-index: 2;
+  display: block; width: 12px; height: 12px; border-radius: 50%;
+  background: rgba(0,224,255,0.95); border: 2px solid #eafcff;
+  box-shadow: 0 0 10px rgba(0,224,255,0.9), 0 0 22px rgba(0,224,255,0.5);
+}
+/* Radar-lock ping -- an expanding, fading ring behind the dot, so a
+   pulled-up location reads as "locked onto" rather than a plain pin. */
+.map-widget__marker-ping {
+  position: absolute; top: 50%; left: 50%; z-index: 1;
+  width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%;
+  border: 2px solid rgba(0,224,255,0.8);
+  animation: markerPing 1.8s cubic-bezier(0.2,0.6,0.4,1) infinite;
+}
+@keyframes markerPing {
+  0% { transform: scale(1); opacity: 0.9; }
+  100% { transform: scale(4.2); opacity: 0; }
+}
+
+/* MapLibre dark retheme. Both style providers (MapTiler's "dataviz-dark"
+   with a key, OpenFreeMap's keyless "dark" style otherwise -- see
+   MAPTILER_KEY in MapWidget.tsx) are already real dark vector maps, so no
+   CSS filter is needed on the canvas itself. This just overrides
+   MapLibre's own default light-UI control chrome to match. */
+.w-map .maplibregl-map { background: #04121a; font-family: var(--hud-font); }
+.w-map .maplibregl-ctrl-group {
+  background: rgba(0,10,20,0.85) !important; border: 1px solid rgba(0,240,255,0.25) !important;
+  box-shadow: none !important;
+}
+.w-map .maplibregl-ctrl-group button { background: transparent !important; }
+.w-map .maplibregl-ctrl-group button:hover { background: rgba(0,240,255,0.22) !important; }
+.w-map .maplibregl-ctrl-icon { filter: invert(1) hue-rotate(180deg) brightness(1.6); }
+.w-map .maplibregl-ctrl-attrib {
+  background: rgba(0,10,20,0.75) !important; color: rgba(0,240,255,0.45) !important; font-size: 8px !important;
+}
+.w-map .maplibregl-ctrl-attrib a { color: rgba(0,240,255,0.65) !important; }

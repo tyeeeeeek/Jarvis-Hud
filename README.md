@@ -29,16 +29,32 @@ Electron, React, and a Python voice pipeline. Highlights:
   name and routes it to the matching existing tool (`self_improve`, `build_creation`,
   `ask_claude_web`, `get_financial_insights`) — hiring never grants new capability, just a
   roster you can check with "who's on my team." See `hire_employee`/`list_employees`.
-- **Homelab widget**: Synology NAS status (CPU/memory/storage, read-only), a real
-  internet speed test (on demand or every 6 hours), and router-agnostic new-device
-  LAN alerts (an nmap ping sweep from this PC, not a router API) over Telegram. See
-  "Homelab (NAS + network)" below — the NAS piece needs some setup on your end.
+- **Homelab widget**: Synology NAS status (CPU/memory/storage, read-only), NAS folder
+  sync (export/import/list a folder, jailed to one NAS folder you choose — see
+  `sync_bank_data`'s automatic pull for the bank-statements use case), a real internet
+  speed test (on demand or every 6 hours), and router-agnostic new-device LAN alerts
+  (an nmap ping sweep from this PC, not a router API) over Telegram. See "Homelab (NAS
+  + network)" below — the NAS piece needs some setup on your end.
 - **Live weather widget** (via the free Open-Meteo API — no API key needed)
 - **Time / date widget**
 - **Voice wake word** ("Jarvis") with speech recognition
 - **Draggable, glass-panel widgets** with smooth show/hide transitions and a
   right-click menu
-- Full-screen animated "arc reactor" HUD with a live activity feed
+- Full-screen animated "arc reactor" HUD with a live activity feed, an
+  ambient particle field, a radar sweep and degree-tick ring, a one-time
+  power-on boot sequence, live corner readouts (link/mic/session/widget
+  status, not decorative fakes), a distinct amber "thinking" animation
+  while the brain is working, and synthesized UI chirps (wake / thinking
+  tick / response-ready — muteable from the titlebar, no shipped audio
+  files) — see `src/sound.ts` and `src/components/ArcReactor.css`. Its
+  **Phone Vision** and **Phone Camera** widgets mirror the phone HUD's
+  camera Q&A and live camera feed here in real time (see below).
+- **Phone HUD camera Q&A** (`/hud`) — an Iron-Man-style cyan HUD page for
+  your phone: opens your phone's camera, runs local object detection
+  (TensorFlow.js) with animated bounding boxes, and lets you ask any
+  question — by voice or text — about what it sees, answered for real by
+  Gemini vision, spoken back, in a genuine back-and-forth. See "Phone HUD
+  (camera Q&A)" below.
 
 Feel free to fork and extend it.
 
@@ -67,14 +83,26 @@ function:
   brain can only pick a name from the list, the argv for each is hardcoded, `subprocess`
   is always called with a list (never `shell=True`/a joined string), and ping's hostname
   argument is the only free-text input, strictly validated before it's used.
+- `system_power` (shutdown/restart/cancel) only ever calls the `shutdown` binary with a
+  hardcoded flag (`-h`/`-r`/`-c`) plus a delay built from a number, never free text. On
+  Linux it runs through a NOPASSWD sudoers rule scoped to that one binary specifically
+  (see "Shut down / restart the PC") — nothing else gains elevated access. If
+  `JARVIS_ADMIN_BOT_TOKEN` is set, shutdown/restart additionally require an explicit
+  yes/no over the separate JarvisAdmin bot before running (see "Require approval first")
+  — that bot has no capability of its own beyond answering a pending request, and a
+  gated action never runs just because JarvisAdmin isn't configured or reachable.
 - "Hiring an employee" (`hire_employee`) never grants new capability — it only routes a
   named job to one of the existing narrow tools above (`self_improve`, `build_creation`,
   `ask_claude_web`, `get_financial_insights`), each already scoped exactly as described here.
-- The Synology NAS integration is read-only monitoring only — CPU/memory/storage status,
-  nothing else. There is deliberately no tool that can reboot, shut down, or reconfigure
-  the NAS. The LAN device scan (`network_watch.py`) is a read-only ping sweep + reading
-  this PC's own kernel neighbor table — it never touches the router or any discovered
-  device beyond pinging it.
+- The Synology NAS integration's status calls (`get_nas_status`) are read-only —
+  CPU/memory/storage status, nothing else. Its folder-sync calls (`export_folder_to_nas`,
+  `import_folder_from_nas`, `list_nas_folder`, and `sync_bank_data`'s automatic NAS pull)
+  do read and write files, but only inside a single jailed NAS folder (`SYNOLOGY_BASE_PATH`)
+  — the same "fixed set of folders, never an arbitrary path" jail `_SAFE_DIRS` applies to
+  local filesystem tools. There is deliberately no tool that can reboot, shut down, or
+  reconfigure the NAS, or reach any NAS path outside that one folder. The LAN device scan
+  (`network_watch.py`) is a read-only ping sweep + reading this PC's own kernel neighbor
+  table — it never touches the router or any discovered device beyond pinging it.
 
 ---
 
@@ -188,7 +216,16 @@ venv\Scripts\python.exe jarvis.py
 ├── sms.py                    # Twilio SMS bridge — text Jarvis, it texts back
 ├── telegram_bridge.py        # Free Telegram bridge — same idea, no Twilio needed
 ├── jarvis_cpu_alerts.py      # JarvisCPU_Alerts — dedicated bot for PC health alerts (two-way: texts back an on-demand check)
-├── email_watcher.py          # Gmail polling + importance triage (bills, offers, deliveries)
+├── email_watcher.py          # Gmail + Outlook polling + importance triage (bills, offers, deliveries)
+├── bot_events.py              # Shared in-process event bus every watcher/employee/bot publishes to
+├── memory_store.py            # Long-term memory: SQLite + full-text search, explicit + passive capture
+├── employees.py               # Real background job queue + worker loop backing hire_employee
+├── dashboard_server.py        # Phone dashboard: Flask + SSE, Tailscale-bound, token-authenticated
+├── dashboard/index.html       # The dashboard page itself (edited/served live, no build step)
+├── dashboard/jarvis_hud.html  # Phone HUD: Iron-Man-style desk-view camera + object ID (served at /hud)
+├── vision_service.py          # Gemini vision Q&A for the phone HUD's camera (inert without GEMINI_API_KEY)
+├── gmail_service.py          # Gmail + Google Calendar OAuth, drafts, and event creation
+├── outlook_service.py        # Outlook Mail + Calendar (Microsoft Graph) OAuth, drafts, and event creation
 ├── self_improve.md           # Instructions + hard guardrails for the nightly agent
 ├── run_self_improve.ps1      # Wrapper the JarvisSelfImprove scheduled task runs
 ├── plaid_service.py          # Bank-linking Flask service (finance widget)
@@ -207,6 +244,8 @@ venv\Scripts\python.exe jarvis.py
 │       ├── TimeWidget.tsx           # Clock/date display
 │       ├── FinanceWidget.tsx        # Bank-linking / spending display
 │       ├── JarvisConsole.tsx        # Scrolling activity feed (heard / said / tool activity)
+│       ├── VisionWidget.tsx         # Live mirror of the phone HUD's camera Q&A (see /hud)
+│       ├── CameraFeedWidget.tsx     # Live mirror of the phone HUD's camera feed itself (~5fps JPEG relay)
 │       ├── CreationPanel.tsx        # Sandboxed reveal panel for things Jarvis builds
 │       └── ContextMenu.tsx          # Right-click show/hide widget menu
 ```
@@ -452,6 +491,104 @@ alerts are gated on that.
 
 ---
 
+## Shut down / restart the PC
+
+`system_power` (already wired to voice/text/Telegram, no setup needed on Windows)
+lets Jarvis shut down, restart, or cancel a pending shutdown of the machine it's
+running on — "shut down my PC", "restart", "cancel shutdown". Defaults to a
+1-minute delay (say "now"/"immediately" to skip that); either way it also stops
+Jarvis's own backend, since it's the same machine.
+
+**On Linux, this needs a one-time setup step.** Jarvis runs as your ordinary
+desktop user, and whether that user's session is treated as "active" by
+polkit (and so gets a passwordless shutdown) depends on exactly how the
+backend process was started — not something to depend on, especially since a
+shutdown/restart triggered remotely over Telegram has no way to respond to a
+graphical password prompt if one pops up. So on Linux, `system_power` always
+runs `shutdown` through `sudo -n` (non-interactive — fails fast with a clear
+message instead of ever hanging on a prompt) with a narrow, single-binary
+NOPASSWD rule:
+
+```
+echo "$USER ALL=(root) NOPASSWD: /usr/sbin/shutdown" | sudo tee /etc/sudoers.d/jarvis-shutdown
+sudo chmod 0440 /etc/sudoers.d/jarvis-shutdown
+sudo visudo -c   # validates every file in sudoers.d -- confirm it says "parsed OK"
+```
+
+### Real actions from your phone (scoped NOPASSWD, no password stored anywhere)
+
+`get_disk_health`, `run_security_audit` (lynis), and `run_rootkit_scan` (rkhunter)
+all need root for their real, full-depth results. They already work without
+this setup — they just fall back to a plain non-root run (lynis skips root-only
+checks; smartctl and rkhunter report a clear permission-denied message) — but
+for the real thing, triggerable from your phone over Telegram with no password
+prompt, add the same kind of narrow NOPASSWD rule `system_power` already uses
+above. **No password is stored anywhere, ever** — the OS itself grants
+passwordless root for these three exact commands only; everything else on this
+account still needs a real password same as before:
+
+```
+sudo tee /etc/sudoers.d/jarvis-diagnostics <<'EOF'
+tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/smartctl -a /dev/*
+tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/rkhunter --check --sk --nocolors
+tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/lynis audit system --quick --no-colors --no-log --report-file *
+EOF
+sudo chmod 0440 /etc/sudoers.d/jarvis-diagnostics
+sudo visudo -c   # confirm it says "parsed OK"
+```
+
+This is deliberately NOT what `run_admin_action` uses (that tool runs arbitrary,
+Jarvis-decided commands — there's no way to scope a NOPASSWD rule to "whatever
+command Jarvis picks" without it being equivalent to disabling sudo protection
+for this account entirely, so it still requires a real password, or the
+JarvisAdmin approval gate plus a manually-granted sudo session, same as before).
+
+### Require approval first (JarvisAdmin bot)
+
+A third, dedicated Telegram bot — separate from the two-way command bot and the
+alert-only bots above — whose only job is asking permission before a
+high-consequence action runs. Right now that's `system_power`'s shutdown/restart
+(not cancel, which only reduces risk); the same `jarvis_admin.request_approval()`
+call other tools could opt into later.
+
+1. Message **@BotFather** in Telegram, send `/newbot`, and follow the prompts —
+   name it something like "Jarvis Admin" so it's visually distinct from your
+   command bot. It replies with a token like `123456:ABC-...`.
+2. Send your new bot literally anything (e.g. "hi") so it's allowed to message
+   you back — Telegram bots can't DM someone who hasn't messaged them first.
+3. In `.env`, set:
+   ```
+   JARVIS_ADMIN_BOT_TOKEN=123456:ABC-...   # from BotFather, step 1
+   ```
+   `JARVIS_ADMIN_CHAT_ID` isn't needed — it defaults to your existing
+   `TELEGRAM_CHAT_ID` (the same Telegram account, so the same numeric chat ID
+   applies to any bot you message). Set `JARVIS_ADMIN_CHAT_ID` explicitly only
+   if you want approvals to go to a different account than your command bot.
+4. Restart Jarvis. Ask it to shut down or restart — instead of running
+   immediately, JarvisAdmin will message you asking "Approval needed: Jarvis
+   wants to shutdown this PC in 1 minute(s)." Reply **YES** or **NO** there
+   (not on the command bot) within 3 minutes (`JARVIS_ADMIN_APPROVAL_TIMEOUT_SECONDS`
+   to change that) — anything else is ignored and it keeps waiting. Jarvis's
+   reply on the command bot won't come back until you've answered or the
+   timeout passes, since that's the whole point: a human in the loop before it
+   runs.
+
+This is opt-in: leave `JARVIS_ADMIN_BOT_TOKEN` unset and shutdown/restart behave
+exactly as before, no approval step. A leaked JarvisAdmin token can only be used
+to approve/deny a request it's told about while one is pending — it never grants
+any other capability, and it never falls back to asking on the main bot if it
+isn't configured (a gated action simply won't run rather than asking somewhere
+else).
+
+This grants passwordless `sudo` for exactly one binary (`/usr/sbin/shutdown`,
+with any arguments) — nothing else gains elevated access. `system_power`
+itself already only ever calls it with `-h`/`-r`/`-c` plus a delay it
+constructs from a number, never free-text passed through from what you say to
+Jarvis. Until this is set up, shutdown/restart/cancel requests fail with a
+clear "passwordless sudo isn't set up yet" message rather than hanging.
+
+---
+
 ## Homelab (NAS + network)
 
 Jarvis can report on your Synology NAS and your LAN — a "Homelab" HUD widget plus
@@ -488,10 +625,39 @@ segment the network), and needs no router configuration at all.
    all, or want NAS status to keep working if Jarvis is ever off your home network.
 3. Restart Jarvis and ask "what's my NAS status" or check the Homelab widget.
 
-This was written against Synology's documented Web API but **not verified against
-a live NAS** (no network path to it from where this was built) — if it errors, the
-raw DSM response is included in the error message; paste that back and it's a
-quick fix (or ask Jarvis to `self_improve` it).
+This has been verified live against a real DS720+ over Tailscale — if it errors
+for you, the raw DSM response is included in the error message; paste that back
+and it's a quick fix (or ask Jarvis to `self_improve` it).
+
+### NAS folder sync (export/import/list, and automatic bank statement pull)
+
+Lets Jarvis and your NAS hand folders back and forth, jailed to one NAS folder you
+choose so this can never touch anything else on the NAS.
+
+1. On the NAS, create a shared folder (DSM: Control Panel → Shared Folder → Create),
+   e.g. `JarvisSync`, and give the DSM user from the status setup above read/write
+   permission on it (Control Panel → Shared Folder → Edit → Permissions).
+2. Set `SYNOLOGY_BASE_PATH=/JarvisSync` (or whatever you named it) in `.env`. Every
+   folder-sync call below is relative to this path — there is no way to reach
+   anywhere else on the NAS from here.
+3. Ask Jarvis things like:
+   - "Export my Bank Statements folder to the NAS" — uploads
+     `~/Desktop/Bank Statements` to `SYNOLOGY_BASE_PATH/Bank Statements` on the NAS
+     (`export_folder_to_nas`). Works for any folder inside desktop/documents/
+     downloads/pictures/music/videos/creations, not just that one.
+   - "What's in the Bank Statements folder on the NAS" — lists it (`list_nas_folder`).
+   - "Grab my Bank Statements folder from the NAS" — downloads it back down into the
+     matching local folder (`import_folder_from_nas`).
+   - "Sync my bank data" — `sync_bank_data` automatically pulls anything new from
+     `SYNOLOGY_BASE_PATH/Bank Statements` on the NAS into `~/JarvisStatements` first
+     (alongside its existing Telegram-import step), then parses everything found
+     there, so a CSV dropped into that NAS folder from your phone or any other
+     device is picked up with one command — see "Local bank statement import" above
+     for supported formats.
+
+These calls copy files; they never delete the source, on either side, so "moving" a
+folder today means exporting/importing and then deleting the original yourself if
+you want it gone from one side.
 
 ### New-device LAN alerts + internet speed
 
@@ -516,17 +682,28 @@ terminal output before touching it.
 
 ---
 
-## Watch my email
+## Connect email + calendar (Gmail & Outlook)
 
-Jarvis can watch your inbox and proactively tell you (voice + text) about anything
-that looks like a bill due, a job offer, a delivery update, or a finished-task
-notification. This is a **separate** Gmail connection from anything this chat session
-uses — Jarvis needs to keep watching even when no Claude Code session is open.
+Jarvis can watch your inbox (voice + text alerts on anything that looks like a bill
+due, a job offer, a delivery update, or a finished-task notification), write real
+email drafts for you to review and send yourself, and create real calendar events —
+on Gmail, Outlook, or both. Each provider is independent: set up one, both, or
+neither. These are **separate** connections from anything this chat session uses —
+Jarvis needs to keep working even when no Claude Code session is open.
+
+**Draft-only, always.** Neither integration is ever granted a scope capable of
+sending mail (`gmail.compose`/`Mail.ReadWrite`, never `gmail.send`/`Mail.Send`) —
+so a draft Jarvis writes always lands in your Drafts folder for you to review and
+send yourself, never automatically. Calendar events are created directly (like a
+reminder or a note) since they're trivially reversible — just delete the event if
+Jarvis got it wrong.
+
+### Gmail + Google Calendar
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/), create a
    project (or use an existing one).
-2. Enable the **Gmail API** for it (APIs & Services → Enable APIs → search "Gmail
-   API").
+2. Enable both the **Gmail API** and the **Google Calendar API** for it (APIs &
+   Services → Enable APIs → search each by name).
 3. Configure the OAuth consent screen (APIs & Services → OAuth consent screen) —
    choose "External," fill in the required fields, and add your own Google account as
    a test user. (This stays in testing mode indefinitely for personal use — no Google
@@ -535,11 +712,277 @@ uses — Jarvis needs to keep watching even when no Claude Code session is open.
    client ID → Desktop app).
 5. Download the resulting JSON and save it as `credentials.json` directly in this
    project folder.
-6. Restart Jarvis. The first time, a browser window will open asking you to sign in
-   and approve access — after that it's cached in `token.json` and never asks again.
+6. Restart Jarvis. The first time it needs Gmail/Calendar, a browser window opens
+   asking you to sign in and approve access to mail (read + drafts) and calendar
+   events — after that it's cached in `token.json` and never asks again. If you had
+   an older `token.json` from before calendar support was added, delete it once so
+   you're prompted for the new scope too.
 
-Classification runs on your local Ollama model (not Claude) since it polls every
-couple of minutes — cheap and private, no per-check API cost.
+### Outlook + Outlook Calendar
+
+1. Go to the [Azure Portal](https://portal.azure.com/) → **App registrations** → New
+   registration. Name it anything (e.g. "Jarvis"), and under "Supported account
+   types" choose "Accounts in any organizational directory and personal Microsoft
+   accounts."
+2. After creating it, open **Authentication** and turn on "Allow public client
+   flows" → Yes → Save. (This lets Jarvis use device-code login with no client
+   secret — nothing sensitive to store or leak.)
+3. Copy the **Application (client) ID** from the app's Overview page into
+   `OUTLOOK_CLIENT_ID` in `.env`.
+4. One-time login — run this from an interactive terminal (not as the background
+   service):
+   ```
+   venv/bin/python -c "import outlook_service; outlook_service.ensure_authenticated()"
+   ```
+   It prints a URL and a short code — visit the URL on any device (your phone is
+   fine) and enter the code. Once approved, the result is cached in
+   `token_outlook.json` and this never needs repeating (until the refresh token
+   itself expires, which Microsoft accounts rarely do for an active app).
+5. Restart Jarvis.
+
+### Using it
+
+Just ask/text Jarvis naturally: *"draft an email to jane@company.com about the
+budget"*, *"add a dentist appointment tomorrow at 2pm to my calendar"*, *"put that
+on both my Gmail and Outlook calendars."* Important-mail alerts run automatically
+in the background on whichever provider(s) are configured, using the real Claude
+CLI to write a natural summary (falls back to your local Ollama model if the CLI
+isn't available) rather than a flat classifier dump.
+
+---
+
+## Hire an employee
+
+Say or text *"hire a developer to improve the weather widget"*, *"hire a designer to
+build me a habit tracker"*, *"hire a researcher to find out..."*, or *"hire an analyst
+for financial tips"* and Jarvis puts a named employee (Dev-1, Design-1, Research-1,
+Finance-1, ...) on it in the background — the reply comes back immediately, not after
+the job finishes, so a `self_improve`/`build_creation` job that takes several minutes
+never blocks the conversation. Ask *"who's on my team"* / *"is Dev-1 done yet"* any
+time to check status (queued/running/done/failed) and the result once it lands.
+
+Employees can also hire each other for a concrete, narrow case: if an analyst's report
+turns up a real spending anomaly, it automatically hires a researcher to look into it.
+Hiring never grants any new capability beyond what the four roles already do
+(`self_improve`/`build_creation`/`ask_claude_web`/`get_financial_insights`) — it's a
+name, a queue slot, and a background thread, nothing more.
+
+---
+
+## Phone dashboard
+
+A real, self-hosted control panel reachable from your phone, styled as a Teams-style
+contact list rather than the PC HUD's cyan sci-fi theme — a distinct, sleeker look on
+purpose. **Requires Tailscale** to be installed and signed in on your phone with the
+same account as this machine (the same tailnet the NAS integration already uses) —
+the dashboard binds to this machine's Tailscale IP specifically, never the public
+internet or even the plain LAN, so it's only reachable from devices you've actually
+approved onto your tailnet.
+
+- **Chats tab** — every bot (J.A.R.V.I.S, JarvisCPU_Alerts, JarvisImprovement,
+  JarSecurity, JarvisAdmin) as a contact with a live status dot; tap one to open a
+  real chat thread and message it directly — the exact same reply logic each bot's
+  Telegram channel already uses, just reachable from here too. Tap a contact's name
+  to see their profile (role, configured status). JarvisAdmin is the one exception —
+  by design it's not a general chat bot (see its own module docstring), so instead of
+  a message box it shows any pending approval request live, with real Approve/Deny
+  buttons.
+- **Home tab** — at-a-glance widgets (PC health, security, NAS, this month's spending),
+  quick-action buttons (check health, run a security sweep, sync bank data — all live,
+  results reflected in the widgets within seconds), and a live activity feed of
+  everything happening across the whole backend below.
+- **Finance tab** — a real financial dashboard grounded in your synced bank statements
+  (from the NAS `Bank Statements` folder or Telegram uploads, same ledger
+  `get_spending_summary`/`get_recurring_charges` already use): total spent with a
+  trend arrow, a category breakdown, a monthly trend chart, top merchants, recurring
+  charges, and a history of anomalies Jarvis has actually flagged. Read-only display —
+  never consumes the finance watchdog's own "alert once" state, so opening this tab
+  never silently swallows a real alert you'd otherwise have gotten.
+- **Tools tab** — every one of Jarvis's ~60 named tools, searchable, with an
+  auto-generated form and a Run button.
+- **Team tab** — hire an employee and watch it go queued → running → done live.
+
+A banner appears at the top of every tab whenever JarvisAdmin has a pending approval
+waiting, so you're never stuck on the wrong screen not knowing something needs a
+decision.
+
+1. Make sure Tailscale is connected on both this machine (`tailscale status`) and
+   your phone (Tailscale app, signed into the same account).
+2. Start/restart Jarvis. The startup log prints the dashboard's URL and the path to
+   its access token, e.g.:
+   ```
+   [Dashboard] Phone dashboard -> http://100.x.x.x:8767 (token in ~/.jarvis/dashboard_token.txt)
+   ```
+   A token is generated automatically the first time (or set `DASHBOARD_TOKEN`
+   yourself in `.env` to pick your own) — cat that file once to get it, e.g.:
+   `cat ~/.jarvis/dashboard_token.txt`.
+3. Open that URL on your phone's browser, paste the token in once — it's cached in
+   the browser after that.
+
+The page itself (`dashboard/index.html`) is read fresh from disk on every request —
+you (or a future "improve the dashboard" self-improve pass) can keep editing it and
+the changes show up immediately, no rebuild or restart needed. `/api/run` only ever
+calls a tool already registered in `jarvis_mcp_server.py`'s tool list, by exact name —
+the same registry your voice/Telegram commands use, never a raw command channel — so
+every tool's existing safety behavior (jailed folders, curated app lists, JarvisAdmin's
+approval gate inside shutdown/restart, draft-only email) applies exactly the same way
+here.
+
+---
+
+## Phone HUD (camera Q&A)
+
+A second phone page, separate from the Teams-style dashboard above and
+reachable at the same Tailscale server plus `/hud` — reuses the same
+access token, no extra setup beyond enabling HTTPS below. This one is
+a cyan sci-fi HUD: monospace type, a live clock, a bordered camera
+viewport with animated local bounding boxes, a typewriter-effect
+transcript, and a bottom waveform visualizer.
+
+Point your phone's camera at anything and ask a real question about
+it — by voice or by typing — and get a real, grounded answer back, not
+a scripted demo response. "What kind of plant is this?", "is this
+outlet safe to use?", "how many of these are in the bag?", "what does
+this label say?" — genuinely open-ended, the same way you'd ask a
+person looking over your shoulder.
+
+### Enable HTTPS (required for camera access)
+
+Phone browsers refuse camera and speech-recognition access on a plain-HTTP
+page, so the `/hud` page needs the dashboard served over real HTTPS — not
+just reachable, actually secure — or the camera simply won't open.
+Tailscale can issue a real, browser-trusted cert for this machine's
+MagicDNS name for free, and Jarvis provisions/renews it automatically once
+it's turned on:
+
+1. Turn on **HTTPS Certificates** for your tailnet (one-time): visit
+   [login.tailscale.com/admin/dns](https://login.tailscale.com/admin/dns)
+   and enable it under "HTTPS Certificates."
+2. Make sure **MagicDNS** is also enabled on the same page (it usually is
+   by default) — the cert is issued for this machine's MagicDNS name
+   (e.g. `my-pc.tailnetname.ts.net`), not its bare Tailscale IP.
+3. Restart Jarvis. The startup log switches from `http://100.x.x.x:8767`
+   to `https://my-pc.tailnetname.ts.net:8767` automatically
+   (`tailscale_service.ensure_https_cert`) — no cert files to manage
+   yourself, it's fetched into `~/.jarvis/https/` and renewed on its own
+   before it expires.
+4. Open that `https://...` URL (not the IP) on your phone. The first
+   visit may show a brief "connecting" delay while the browser verifies
+   the cert chain; after that it's identical to any normal HTTPS site —
+   no manual trust/install step, since it's a real Let's Encrypt cert via
+   Tailscale, not self-signed.
+
+If you skip this, both dashboard pages still work over plain HTTP exactly
+as before — you'll just get a clear camera-permission failure if you try
+to open desk view on `/hud`.
+
+---
+
+### Requires a Gemini API key to actually answer questions
+
+**This is the one piece you need to install/set up — everything else is
+already wired in.** The camera opens and shows live local bounding boxes
+(TensorFlow.js `coco-ssd`, runs entirely in your phone's browser, no
+network round-trip, no key needed) either way, but *answering a question
+about what it sees* needs a real vision-capable model — there's
+deliberately no local-only fallback that guesses, since a wrong guess is
+worse than an honest "not configured yet."
+
+1. Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+   (Google account, no credit card for the free tier).
+2. In `.env`, set `GEMINI_API_KEY=...`.
+3. Restart Jarvis. No package install needed — `vision_service.py` already
+   uses `requests`, already in `requirements.txt`.
+
+Without a key, asking a question gets a spoken "vision isn't configured
+yet" instead of a real answer, so you'll notice immediately if this step
+got missed.
+
+**State machine**, voice-driven (say the phrase, or tap the matching chip
+at the bottom of the screen if speech recognition isn't available/reliable
+on your phone's browser — you can also just type a question into the text
+box, which works regardless of the browser's speech-recognition support):
+
+1. **Idle** — say *"Jarvis, are you there?"* (or tap the chip / press
+   Space on desktop). Plays an activation chirp, opens the camera, and
+   JARVIS says "Online. Ask me anything about what I see."
+2. **Camera active** — ask anything, by voice or by typing — whatever you
+   say/type that isn't a stop phrase is treated as a question. One frame
+   is captured at that moment and sent with your exact question to Gemini
+   (`vision_service.py`'s `answer_question`); the HUD shows an
+   amber "analyzing" state briefly while it thinks, plays a confirm chirp,
+   then speaks the real answer and goes back to listening for your next
+   question — a real back-and-forth, not a single scripted exchange.
+3. Say *"close camera"* to drop back to camera-off/still-awake, or
+   *"Jarvis, sleep"* to reset all the way back to idle.
+
+**Notes:**
+- The clock shows real local time; add `?demo=1` to the URL
+  (`/hud?demo=1`) to instead start it ticking from 23:43.
+- The three UI chirps (activation/scan/confirm) are synthesized in the
+  browser with the Web Audio API, not shipped `.wav` files — nothing to
+  license or host.
+- Speech recognition (`webkitSpeechRecognition`) needs a Chromium-based
+  mobile browser; Safari/iOS support is inconsistent — the text box next
+  to the camera works everywhere regardless.
+- Every recognized question gets a spoken answer, including "close
+  camera" and "Jarvis, sleep" (both now confirm out loud, not just in
+  the transcript text) — and one heard while a previous answer is still
+  in flight is queued rather than dropped, answered automatically the
+  moment the current one finishes. Mobile Chrome is known to silently
+  kill a "continuous" speech-recognition session (backgrounding, a
+  network hiccup, or just idling a while) without always saying so —
+  `startListening`/`_startRecognizer` track whether a session is
+  actually alive and both self-heal on `onend` and carry an 8-second
+  watchdog that force-restarts it if it's gone quiet, so the mic doesn't
+  need a page reload to start working again.
+- Every answered question is also shared with the desktop HUD's **Phone
+  Vision** widget, over the same shared event bus dashboard_server.py's
+  watchdogs already use (`bot_events` → `jarvis.py`'s `_on_bot_event` →
+  its own WebSocket feed). One Jarvis, not two brains that don't know
+  what the other saw.
+- Whenever the camera is open (from "Jarvis, are you there?" until
+  "close camera"/"Jarvis, sleep"), a small downscaled frame is mirrored
+  live to the desktop HUD's **Phone Camera** widget (~5fps, a JPEG
+  relay, not a WebRTC video call) — a *separate, dedicated* path
+  (`dashboard_server.py`'s `register_frame_handler` / `/api/hud/stream`
+  → `jarvis.py`'s `_on_camera_frame`) rather than the same `bot_events`
+  bus the Q&A above uses, since 5 images a second through that shared
+  bus would spam the main Teams-style dashboard's Live Activity feed and
+  evict everything else from its 200-event replay history within
+  seconds. Frames are relayed only, never written to disk anywhere —
+  same "never on a timer, never stored" spirit as the existing screen
+  vision tool. The widget clears the instant you close the camera (an
+  explicit signal, not a guessed timeout), so it never shows a frozen
+  stale frame pretending to still be live.
+- Nothing here is wired into the voice-command brain's tool list — it's
+  purely a dashboard-page feature (camera access + local CV + Gemini via
+  `vision_service.py`), so it doesn't change what "Jarvis" can do from
+  voice/Telegram/SMS.
+
+---
+
+## Long-term memory + daily briefing
+
+Jarvis has real memory now, not just a short recap of the last few conversation
+turns — it persists across days and restarts (`memory_store.py`, SQLite + full-text
+search, no extra dependency or external service). Say *"remember that I..."* to save
+something explicitly, or just mention it in passing — Jarvis also passively decides
+what's worth keeping from ordinary conversation on its own, and quietly recalls
+anything relevant to what you're currently asking, even from a totally separate
+conversation days later. Ask *"what do you remember about me"* any time to see it.
+
+Once a day at 7 AM, Jarvis also sends one cohesive **daily briefing** — PC health,
+security, your finances, what your hired employee team got done overnight, and
+anything it's remembered lately — synthesized into a single natural message instead
+of four separate watchdog pings.
+
+**Passive memory capture needs Ollama running** (`ollama.com`, `ollama serve`) — it's
+listed as a project requirement, but wasn't actually installed on this machine as of
+this port; without it, the explicit `remember_this`/`recall_memory` tools (which go
+through the real Claude CLI, same as every other command) still work fully, but the
+background "catch things I didn't explicitly ask to be remembered" capture silently
+does nothing until Ollama is installed and running.
 
 ---
 

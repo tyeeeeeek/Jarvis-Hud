@@ -153,13 +153,36 @@ export function FinanceWidget() {
           </div>
 
           <div className="w-divider" />
-
-          {summary.by_category.slice(0, 5).map((c) => (
+          <span className="w-sublabel">BY CATEGORY</span>
+          {summary.by_category.slice(0, 8).map((c) => (
             <div className="w-row w-row--spread" key={c.name}>
               <span className="w-stat-lbl">{c.name.toUpperCase()}</span>
               <span className="w-stat-val">${c.amount.toFixed(0)}</span>
             </div>
           ))}
+
+          {summary.top_merchants && summary.top_merchants.length > 0 && (
+            <>
+              <div className="w-divider" />
+              <span className="w-sublabel">TOP MERCHANTS</span>
+              {summary.top_merchants.slice(0, 6).map((m) => (
+                <div className="w-row w-row--spread" key={m.name}>
+                  <span className="w-stat-lbl">{m.name.toUpperCase()}</span>
+                  <span className="w-stat-val">${m.amount.toFixed(0)}</span>
+                </div>
+              ))}
+            </>
+          )}
+
+          {typeof summary.previous_period_spent === "number" && (
+            <>
+              <div className="w-divider" />
+              <div className="w-row w-row--spread">
+                <span className="w-stat-lbl">PRIOR {summary.period_days}D</span>
+                <span className="w-stat-val">${summary.previous_period_spent.toFixed(0)}</span>
+              </div>
+            </>
+          )}
 
           {summary.monthly_trend && summary.monthly_trend.length > 1 && (
             <>

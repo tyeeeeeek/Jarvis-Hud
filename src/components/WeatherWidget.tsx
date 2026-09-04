@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
 // ─── Edit these to your location ──────────────────────────────────────────
-const LAT = 41.7658;
-const LON = -72.6734;
-const LOCATION_LABEL = "HARTFORD, CT";
+const LAT = 41.3712;
+const LON = -73.4140;
+const LOCATION_LABEL = "BETHEL, CT";
 
 const WMO: Record<number, string> = {
   0: "CLEAR SKY", 1: "MAINLY CLEAR", 2: "PARTLY CLOUDY", 3: "OVERCAST",
@@ -25,9 +25,39 @@ function aqiInfo(aqi: number): { label: string; color: string } {
   return { label: "HAZARDOUS", color: "#b71c1c" };
 }
 
+interface HourPoint { time: string; temp: number; condition: string; precipProb: number | null }
+interface DayPoint { label: string; condition: string; hi: number; lo: number; precipProb: number | null }
+
 interface WeatherData {
   temp: number; feelsLike: number; condition: string;
   humidity: number; windSpeed: number; aqi: number;
+  windDir: number | null; windGust: number | null;
+  pressure: number | null; uvIndex: number | null; dewPoint: number | null;
+  sunrise: string | null; sunset: string | null;
+  hourly: HourPoint[]; daily: DayPoint[];
+}
+
+function windDirLabel(deg: number | null): string {
+  if (deg === null) return "–";
+  const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  return dirs[Math.round(deg / 45) % 8];
+}
+function hourLabel(iso: string): string {
+  const d = new Date(iso);
+  const h = d.getHours();
+  return `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? "A" : "P"}`;
+}
+function dayLabel(iso: string): string {
+  return new Date(iso + "T00:00:00").toLocaleDateString("en-US", { weekday: "short" }).toUpperCase().slice(0, 3);
+}
+function clockLabel(iso: string | null): string {
+  if (!iso) return "–";
+  const d = new Date(iso);
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ap = h < 12 ? "AM" : "PM";
+  h = h % 12 || 12;
+  return `${h}:${m.toString().padStart(2, "0")}${ap}`;
 }
 
 export function WeatherWidget() {
@@ -42,8 +72,10 @@ export function WeatherWidget() {
           fetch(
             `https://api.open-meteo.com/v1/forecast` +
             `?latitude=${LAT}&longitude=${LON}` +
-            `&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m` +
-            `&temperature_unit=fahrenheit&wind_speed_unit=mph`
+            `&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure,uv_index,dew_point_2m` +
+            `&hourly=temperature_2m,weather_code,precipitation_probability` +
+            `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset` +
+            `&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=7`
           ),
           fetch(
             `https://air-quality-api.open-meteo.com/v1/air-quality` +
@@ -53,6 +85,23 @@ export function WeatherWidget() {
         const w = await wRes.json();
         const a = await aRes.json();
         const c = w.current;
+
+        const nowIdx = (w.hourly?.time ?? []).findIndex((t: string) => new Date(t) >= new Date());
+        const startIdx = nowIdx >= 0 ? nowIdx : 0;
+        const hourly: HourPoint[] = (w.hourly?.time ?? []).slice(startIdx, startIdx + 8).map((t: string, i: number) => ({
+          time: hourLabel(t),
+          temp: Math.round(w.hourly.temperature_2m[startIdx + i]),
+          condition: WMO[w.hourly.weather_code[startIdx + i]] ?? "–",
+          precipProb: w.hourly.precipitation_probability?.[startIdx + i] ?? null,
+        }));
+        const daily: DayPoint[] = (w.daily?.time ?? []).slice(0, 6).map((t: string, i: number) => ({
+          label: i === 0 ? "TODAY" : dayLabel(t),
+          condition: WMO[w.daily.weather_code[i]] ?? "–",
+          hi: Math.round(w.daily.temperature_2m_max[i]),
+          lo: Math.round(w.daily.temperature_2m_min[i]),
+          precipProb: w.daily.precipitation_probability_max?.[i] ?? null,
+        }));
+
         setData({
           temp: Math.round(c.temperature_2m),
           feelsLike: Math.round(c.apparent_temperature),
@@ -60,6 +109,15 @@ export function WeatherWidget() {
           humidity: c.relative_humidity_2m,
           windSpeed: Math.round(c.wind_speed_10m),
           aqi: Math.round(a.current?.us_aqi ?? 0),
+          windDir: c.wind_direction_10m ?? null,
+          windGust: c.wind_gusts_10m !== undefined ? Math.round(c.wind_gusts_10m) : null,
+          pressure: c.surface_pressure ?? null,
+          uvIndex: c.uv_index ?? null,
+          dewPoint: c.dew_point_2m !== undefined ? Math.round(c.dew_point_2m) : null,
+          sunrise: w.daily?.sunrise?.[0] ?? null,
+          sunset: w.daily?.sunset?.[0] ?? null,
+          hourly,
+          daily,
         });
         setStatus("ok");
       } catch {
@@ -101,7 +159,36 @@ export function WeatherWidget() {
             </div>
             <div className="w-stat">
               <span className="w-stat-lbl">WIND</span>
-              <span className="w-stat-val">{data.windSpeed} MPH</span>
+              <span className="w-stat-val">{data.windSpeed} MPH {windDirLabel(data.windDir)}</span>
+            </div>
+            <div className="w-stat">
+              <span className="w-stat-lbl">GUSTS</span>
+              <span className="w-stat-val">{data.windGust !== null ? `${data.windGust} MPH` : "–"}</span>
+            </div>
+            <div className="w-stat">
+              <span className="w-stat-lbl">DEW PT</span>
+              <span className="w-stat-val">{data.dewPoint !== null ? `${data.dewPoint}°` : "–"}</span>
+            </div>
+          </div>
+
+          <div className="w-divider" />
+
+          <div className="w-row w-row--spread">
+            <div className="w-stat">
+              <span className="w-stat-lbl">PRESSURE</span>
+              <span className="w-stat-val">{data.pressure !== null ? `${Math.round(data.pressure)} HPA` : "–"}</span>
+            </div>
+            <div className="w-stat">
+              <span className="w-stat-lbl">UV INDEX</span>
+              <span className="w-stat-val">{data.uvIndex !== null ? data.uvIndex.toFixed(0) : "–"}</span>
+            </div>
+            <div className="w-stat">
+              <span className="w-stat-lbl">SUNRISE</span>
+              <span className="w-stat-val">{clockLabel(data.sunrise)}</span>
+            </div>
+            <div className="w-stat">
+              <span className="w-stat-lbl">SUNSET</span>
+              <span className="w-stat-val">{clockLabel(data.sunset)}</span>
             </div>
           </div>
 
@@ -118,6 +205,46 @@ export function WeatherWidget() {
               </div>
             );
           })()}
+
+          {data.hourly.length > 0 && (
+            <>
+              <div className="w-divider" />
+              <span className="w-sublabel">NEXT HOURS</span>
+              <div className="w-weather-hourly">
+                {data.hourly.map((h, i) => (
+                  <div key={i} className="w-weather-hourly__col">
+                    <span className="w-stat-lbl">{h.time}</span>
+                    <span className="w-weather-hourly__temp">{h.temp}°</span>
+                    {h.precipProb !== null && h.precipProb > 0 && (
+                      <span className="w-weather-hourly__precip">{h.precipProb}%</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {data.daily.length > 0 && (
+            <>
+              <div className="w-divider" />
+              <span className="w-sublabel">6-DAY OUTLOOK</span>
+              <div className="w-weather-daily">
+                {data.daily.map((d, i) => (
+                  <div key={i} className="w-weather-daily__row">
+                    <span className="w-weather-daily__label">{d.label}</span>
+                    <span className="w-weather-daily__cond">{d.condition}</span>
+                    {d.precipProb !== null && d.precipProb > 0 && (
+                      <span className="w-weather-daily__precip">{d.precipProb}%</span>
+                    )}
+                    <span className="w-weather-daily__temps">
+                      <span className="w-weather-daily__hi">{d.hi}°</span>
+                      <span className="w-weather-daily__lo">{d.lo}°</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </>

@@ -127,44 +127,49 @@ def send_test_message() -> bool:
                   "the JarvisImprovement Telegram pipeline is working.")
 
 
-def poll_thread(pipeline_stop) -> None:
-    """This bot's two-way half: long-polls its own token/chat (isolated from
-    every other bot's inbox). A question (see _looks_like_question()) gets
-    an immediate reply, grounded via telegram_common.ask_grounded() in
+def _run(focus):
+    import tools
+    try:
+        tools.self_improve(focus)
+    except Exception as e:
+        print(f"  [JarvisImprovement] on-demand run failed: {e}")
+
+
+def respond(text: str) -> str:
+    """Answer or route one message the same way this bot's Telegram two-way
+    channel does. A question (see _looks_like_question()) gets an
+    immediate reply, grounded via telegram_common.ask_grounded() in
     tools.agent_status()'s real on-disk history -- no self-improve run
     triggered. Anything else is treated as an on-demand self-improvement
     request, run through tools.self_improve() -- the exact same mechanism,
     constraints, and build-verify gate as the "Jarvis, improve on ..."
     voice/text command. self_improve() can take several minutes (it shells
     out to Claude Code), so it's handed off to a background thread rather
-    than run on the poll loop itself, which would otherwise sit unable to
-    notice a stop signal or a second incoming message until the run
-    finished; an immediate ack goes out first so the user knows it was
-    received. self_improve() already sends its own JarvisImprovement report
-    (via tools._report_ondemand_improve) once the run completes, so nothing
-    further needs to be sent from here. tools is imported locally, not at
-    module load time, because tools.py imports this module -- importing it
-    back up top would be a circular import."""
-    def _run(focus):
+    than run inline, which would otherwise block whichever channel (poll
+    loop, dashboard chat request) called this; only the immediate ack is
+    returned here. self_improve() already sends its own JarvisImprovement
+    report (via tools._report_ondemand_improve) once the run completes, so
+    nothing further needs to be sent from here. Shared by poll_thread()
+    (Telegram) and the phone dashboard's chat. tools is imported locally,
+    not at module load time, because tools.py imports this module --
+    importing it back up top would be a circular import."""
+    if _looks_like_question(text):
         import tools
         try:
-            tools.self_improve(focus)
+            context = tools.agent_status()
         except Exception as e:
-            print(f"  [JarvisImprovement] on-demand run failed: {e}")
+            context = f"Couldn't pull agent status: {e}"
+        return telegram_common.ask_grounded(
+            _AGENT_NAME, "running Jarvis's daily self-improvement passes and reporting on them",
+            context, text)
+    threading.Thread(target=_run, args=(text,), daemon=True).start()
+    return f"On it sir -- looking into \"{text.strip()}\" now. I'll report back when it's done."
 
+
+def poll_thread(pipeline_stop) -> None:
+    """This bot's two-way half: long-polls its own token/chat (isolated from
+    every other bot's inbox) and replies to any incoming text via
+    respond()."""
     def on_message(text):
-        if _looks_like_question(text):
-            import tools
-            try:
-                context = tools.agent_status()
-            except Exception as e:
-                context = f"Couldn't pull agent status: {e}"
-            reply = telegram_common.ask_grounded(
-                _AGENT_NAME, "running Jarvis's daily self-improvement passes and reporting on them",
-                context, text)
-            _send(reply)
-            return
-        _send(f"On it sir -- looking into \"{text.strip()}\" now. I'll report back when it's done.")
-        threading.Thread(target=_run, args=(text,), daemon=True).start()
-
+        _send(respond(text))
     telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)

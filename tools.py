@@ -8,13 +8,23 @@
 #   keys) also imports directly from here so there's exactly one
 #   implementation of each capability, never two.
 #
-#   IMPORTANT: this module intentionally exposes NO shell-exec /
-#   run-arbitrary-command tool. Every capability is a specific,
-#   named, scoped function. If a new capability is needed, add a
-#   new narrow function here -- never widen one of these into a
-#   general-purpose executor.
+#   IMPORTANT: this module intentionally exposes NO *unsupervised*
+#   shell-exec / run-arbitrary-command tool. Every capability is a
+#   specific, named, scoped function. If a new capability is needed,
+#   add a new narrow function here -- never widen one of these into
+#   a general-purpose executor.
+#
+#   The one deliberate exception is run_admin_action(): real shell
+#   access for one-off installs/admin commands that the fixed list in
+#   run_diagnostic_command can't cover. It's still narrow in the way
+#   that matters -- not a fixed command list, but a hard requirement
+#   that a human approve the exact command, every single time, on a
+#   separate dedicated channel (JarvisAdmin) before it runs. Added
+#   2026-08-31 at the user's explicit request, after discussing scope
+#   with them directly (see run_admin_action's docstring).
 # ================================================================
-import os, re, sys, json, time, shutil, tempfile, ipaddress, threading, subprocess, urllib.parse, webbrowser
+import os, re, sys, json, time, uuid, shutil, signal, tempfile, ipaddress, threading, subprocess, urllib.parse, webbrowser
+from datetime import datetime, timedelta
 
 import requests
 
@@ -41,14 +51,28 @@ except ImportError:
     STATEMENTS_AVAILABLE = False
 
 try:
+    import gmail_service; GMAIL_AVAILABLE = bool(gmail_service.GMAIL_AVAILABLE)
+except ImportError:
+    GMAIL_AVAILABLE = False
+
+try:
+    import outlook_service; OUTLOOK_AVAILABLE = bool(outlook_service.OUTLOOK_AVAILABLE)
+except ImportError:
+    OUTLOOK_AVAILABLE = False
+
+try:
     import telegram_bridge; TELEGRAM_AVAILABLE = True
 except ImportError:
     TELEGRAM_AVAILABLE = False
 
+import bot_events
 import telegram_common
+import jarvis_admin
 import jarvis_cpu_alerts
 import jarvis_improvement
 import jarvis_security
+import employees
+import memory_store
 
 try:
     import browser_control; BROWSER_CONTROL_AVAILABLE = True
@@ -380,6 +404,22 @@ def launch_app(name: str) -> str:
         return f"I couldn't open {name} sir: {e}"
 
 
+def _protected_browser_pids() -> set:
+    """OS process IDs (if any) belonging to the dedicated Jarvis automation
+    browser (browser_control.py) right now. Playwright's bundled Chromium
+    binary is literally named chrome.exe on Windows -- the same image name as
+    the user's ordinary, separate system Chrome -- so a plain image-name kill
+    can't tell them apart on its own. close_app() consults this so "close
+    chrome" only ever closes the user's *other* chrome.exe processes, never
+    silently killing an in-progress play_youtube out from under Playwright."""
+    if not BROWSER_CONTROL_AVAILABLE:
+        return set()
+    try:
+        return browser_control.owned_pids()
+    except Exception:
+        return set()
+
+
 def close_app(name: str) -> str:
     """Close a known desktop application by common name, gracefully (never a
     forced kill). Restricted to the same curated app list as launch_app."""
@@ -395,9 +435,31 @@ def close_app(name: str) -> str:
     image = (_APP_IMAGE_NAMES.get(exe) if exe else None) if IS_WINDOWS else exe
     if not image:
         return f"I won't close {name} sir -- it's not in my curated list of apps I'm allowed to close."
+    protected = _protected_browser_pids()
     try:
         if IS_WINDOWS:
-            subprocess.run(["taskkill", "/IM", image], capture_output=True, timeout=10)
+            if not protected:
+                subprocess.run(["taskkill", "/IM", image], capture_output=True, timeout=10)
+            else:
+                # Same image name (chrome.exe) can legitimately belong to
+                # both the user's regular Chrome and Jarvis's own automation
+                # window -- fall back to killing every matching PID except
+                # the protected ones individually, instead of the blanket
+                # /IM sweep that can't distinguish them.
+                listing = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                for line in listing.stdout.splitlines():
+                    fields = [f.strip('"') for f in line.split('","')]
+                    if len(fields) < 2:
+                        continue
+                    try:
+                        pid = int(fields[1])
+                    except ValueError:
+                        continue
+                    if pid not in protected:
+                        subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True, timeout=10)
         else:
             # taskkill /IM matches by image name regardless of path or args;
             # replicate that on Linux instead of a bare `pkill -x image`,
@@ -409,7 +471,21 @@ def close_app(name: str) -> str:
             # window). Match the full cmdline against an optional path
             # prefix + the image name + optional trailing args instead.
             pattern = rf"(.*/)?{re.escape(image)}( .*)?"
-            subprocess.run(["pkill", "-f", "-x", pattern], capture_output=True, timeout=10)
+            if not protected:
+                subprocess.run(["pkill", "-f", "-x", pattern], capture_output=True, timeout=10)
+            else:
+                listing = subprocess.run(["pgrep", "-f", "-x", pattern],
+                                          capture_output=True, text=True, timeout=10)
+                for line in listing.stdout.splitlines():
+                    line = line.strip()
+                    if not line.isdigit():
+                        continue
+                    pid = int(line)
+                    if pid not in protected:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except OSError:
+                            pass
         return f"Closing {name} sir."
     except Exception as e:
         return f"I couldn't close {name} sir: {e}"
@@ -731,21 +807,272 @@ def get_weather(city: str) -> str:
         return f"I couldn't reach the weather service sir: {e}"
 
 
-# ================================================================ EMAIL (draft only, never sends)
-def draft_email(recipient: str = "", subject: str = "") -> str:
-    """Open a pre-filled Gmail compose draft in the browser. Never sends
-    automatically -- the user must review and hit send themselves."""
-    params = {"view": "cm", "fs": "1"}
-    if subject:
-        params["su"] = subject
-    if recipient:
-        params["to"] = recipient
+def show_map(location: str) -> str:
+    """Pull up a location on the desktop HUD's map widget -- geocodes the
+    name (same free Open-Meteo geocoding get_weather uses, no API key)
+    and pushes it to the HUD over the shared event bus every other
+    watcher/tool publishes to. A rare, meaningful, one-shot event (nothing
+    like the phone camera's high-frequency streams), so unlike those this
+    goes through bot_events normally -- it's fine for it to also show up
+    in the Live Activity feed like any other tool call."""
+    if not location:
+        return "What location sir?"
     try:
-        if not webbrowser.open("https://mail.google.com/mail/?" + urllib.parse.urlencode(params)):
-            return "I couldn't find a browser to open that draft with sir."
-        return f"Opening a draft{' to ' + recipient if recipient else ''}{' about ' + subject if subject else ''} sir. You'll need to hit send yourself."
+        geo = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                            params={"name": location, "count": 1}, timeout=8).json()
+        results = geo.get("results")
+        if not results:
+            return f"I couldn't find {location} sir."
+        lat, lon = results[0]["latitude"], results[0]["longitude"]
+        name = results[0].get("name", location)
+        country = results[0].get("country", "")
+        bot_events.publish("show_map", {"location": name, "country": country, "lat": lat, "lon": lon})
+        return f"Pulling up {name} sir."
     except Exception as e:
-        return f"I couldn't open that draft sir: {e}"
+        return f"I couldn't find that location sir: {e}"
+
+
+def show_weather_radar(city: str = "") -> str:
+    """Switch the desktop HUD's map widget into live precipitation radar
+    mode (RainViewer's free public radar tiles, no API key), optionally
+    re-centered on a named city first -- leave city blank to just toggle
+    radar on wherever the map is already showing."""
+    lat = lon = None
+    name = city or None
+    if city:
+        try:
+            geo = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                                params={"name": city, "count": 1}, timeout=8).json()
+            results = geo.get("results")
+            if results:
+                lat, lon = results[0]["latitude"], results[0]["longitude"]
+                name = results[0].get("name", city)
+        except Exception:
+            pass
+    bot_events.publish("show_weather_radar", {"location": name, "lat": lat, "lon": lon})
+    return f"Showing the radar over {name} sir." if name else "Showing the radar sir."
+
+
+# ================================================================ EMAIL (draft only, never sends)
+def draft_email(recipient: str = "", subject: str = "", body: str = "", provider: str = "gmail") -> str:
+    """Create a real email draft -- visible in the Drafts folder, ready
+    for the user to review and send themselves. NEVER sends automatically;
+    this is a hard constraint (see gmail_service/outlook_service module
+    docstrings for how the OAuth scopes back that up structurally, not
+    just by convention -- neither integration is ever granted a send
+    scope). `provider` is "gmail", "outlook", or "both" (creates the same
+    draft in each configured provider). Write the full email body
+    yourself before calling this -- don't leave `body` empty unless the
+    user explicitly wants a blank draft."""
+    provider = (provider or "gmail").strip().lower()
+    targets = ["gmail", "outlook"] if provider == "both" else [provider]
+    results = []
+    for p in targets:
+        if p == "gmail":
+            if not GMAIL_AVAILABLE:
+                results.append("Gmail isn't connected sir -- see the README's email setup section.")
+                continue
+            r = gmail_service.create_draft(recipient, subject, body)
+            results.append("Gmail draft created sir." if r.get("ok") else f"Gmail draft failed sir: {r.get('error')}")
+        elif p == "outlook":
+            if not OUTLOOK_AVAILABLE:
+                results.append("Outlook isn't connected sir -- see the README's email setup section.")
+                continue
+            r = outlook_service.create_draft(recipient, subject, body)
+            results.append("Outlook draft created sir." if r.get("ok") else f"Outlook draft failed sir: {r.get('error')}")
+        else:
+            results.append(f"I don't recognize \"{p}\" as an email provider sir -- gmail, outlook, or both.")
+    return " ".join(results)
+
+
+# ================================================================ CALENDAR (real events, both providers)
+def create_calendar_event(title: str, start_iso: str, end_iso: str = "",
+                           duration_minutes: float = 30, description: str = "",
+                           attendees: str = "", provider: str = "gmail") -> str:
+    """Create a real calendar event -- unlike draft_email, this genuinely
+    goes on the calendar (same directness as set_reminder/add_note, since
+    a calendar event is trivially reversible -- the user can just delete
+    it -- unlike sending an email). start_iso (and end_iso, if given) must
+    be full ISO 8601 datetimes, e.g. "2026-08-29T15:00:00" -- resolve any
+    relative time ("tomorrow at 3pm") to a real date yourself using the
+    current date/time you were given, don't pass one through literally.
+    If end_iso is omitted, the event runs `duration_minutes` (default 30)
+    after start_iso. `attendees` is a comma-separated list of email
+    addresses (optional). `provider` is "gmail", "outlook", or "both"."""
+    if not title or not start_iso:
+        return "I need at least a title and a start time sir."
+    if not end_iso:
+        try:
+            start_dt = datetime.fromisoformat(start_iso)
+            end_iso = (start_dt + timedelta(minutes=float(duration_minutes or 30))).isoformat()
+        except Exception:
+            return f"I couldn't parse \"{start_iso}\" as a date/time sir -- use ISO 8601, e.g. 2026-08-29T15:00:00."
+
+    provider = (provider or "gmail").strip().lower()
+    targets = ["gmail", "outlook"] if provider == "both" else [provider]
+    results = []
+    for p in targets:
+        if p == "gmail":
+            if not GMAIL_AVAILABLE:
+                results.append("Gmail Calendar isn't connected sir -- see the README's email setup section.")
+                continue
+            r = gmail_service.create_calendar_event(title, start_iso, end_iso, description, attendees)
+            results.append("Added to your Google Calendar sir." if r.get("ok") else f"Google Calendar failed sir: {r.get('error')}")
+        elif p == "outlook":
+            if not OUTLOOK_AVAILABLE:
+                results.append("Outlook Calendar isn't connected sir -- see the README's email setup section.")
+                continue
+            r = outlook_service.create_calendar_event(title, start_iso, end_iso, description, attendees)
+            results.append("Added to your Outlook Calendar sir." if r.get("ok") else f"Outlook Calendar failed sir: {r.get('error')}")
+        else:
+            results.append(f"I don't recognize \"{p}\" as a calendar provider sir -- gmail, outlook, or both.")
+    return " ".join(results)
+
+
+def search_email(query: str = "", days: int = 7, provider: str = "gmail") -> str:
+    """Search recent email -- real subjects/senders/snippets, not a
+    placeholder. `query` is free text (matched against subject/sender/body
+    the way each provider's own search works -- Gmail search syntax like
+    "from:jane" or "is:unread" works directly for provider="gmail");
+    leave blank to just list the most recent mail. `days` bounds how far
+    back to look. `provider` is "gmail", "outlook", or "both". Use
+    read_email with a result's id to get the full body of one message."""
+    days = max(1, int(days or 7))
+    provider = (provider or "gmail").strip().lower()
+    targets = ["gmail", "outlook"] if provider == "both" else [provider]
+    results = []
+    for p in targets:
+        if p == "gmail":
+            if not GMAIL_AVAILABLE:
+                results.append("Gmail isn't connected sir.")
+                continue
+            try:
+                q = f"newer_than:{days}d" + (f" {query}" if query else "")
+                msgs = gmail_service.list_recent_messages(query=q, max_results=10)
+                if not msgs:
+                    results.append("No matching Gmail messages sir.")
+                else:
+                    lines = [f'[{m["id"]}] {m["from"]}: "{m["subject"]}" -- {m["snippet"]}' for m in msgs]
+                    results.append("Gmail:\n" + "\n".join(lines))
+            except Exception as e:
+                results.append(f"Gmail search failed sir: {e}")
+        elif p == "outlook":
+            if not OUTLOOK_AVAILABLE:
+                results.append("Outlook isn't connected sir.")
+                continue
+            try:
+                since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                msgs = outlook_service.list_recent_messages(since, max_results=10)
+                if query:
+                    ql = query.lower()
+                    msgs = [m for m in msgs if ql in m["subject"].lower() or ql in m["from"].lower() or ql in m["snippet"].lower()]
+                if not msgs:
+                    results.append("No matching Outlook messages sir.")
+                else:
+                    lines = [f'[{m["id"]}] {m["from"]}: "{m["subject"]}" -- {m["snippet"]}' for m in msgs]
+                    results.append("Outlook:\n" + "\n".join(lines))
+            except Exception as e:
+                results.append(f"Outlook search failed sir: {e}")
+        else:
+            results.append(f"I don't recognize \"{p}\" as an email provider sir.")
+    return "\n".join(results)
+
+
+def read_email(message_id: str, provider: str = "gmail") -> str:
+    """Get the full plain-text body of one email message -- use this after
+    search_email finds a message whose snippet isn't enough. `message_id`
+    is the id search_email returned in brackets. `provider` must be
+    "gmail" or "outlook" (not "both" -- a message id only belongs to one)."""
+    provider = (provider or "gmail").strip().lower()
+    if provider == "gmail":
+        if not GMAIL_AVAILABLE:
+            return "Gmail isn't connected sir."
+        r = gmail_service.read_message_body(message_id)
+    elif provider == "outlook":
+        if not OUTLOOK_AVAILABLE:
+            return "Outlook isn't connected sir."
+        r = outlook_service.read_message_body(message_id)
+    else:
+        return f"I don't recognize \"{provider}\" as an email provider sir."
+    if not r.get("ok"):
+        return f"Couldn't read that message sir: {r.get('error')}"
+    return f'From {r["from"]}, {r["date"]}: "{r["subject"]}"\n\n{r["body"]}'
+
+
+def list_calendar_events(days_ahead: int = 7, provider: str = "gmail") -> str:
+    """List real upcoming calendar events in the next `days_ahead` days --
+    not a placeholder. `provider` is "gmail", "outlook", or "both"."""
+    days_ahead = max(1, int(days_ahead or 7))
+    provider = (provider or "gmail").strip().lower()
+    targets = ["gmail", "outlook"] if provider == "both" else [provider]
+    results = []
+    for p in targets:
+        if p == "gmail":
+            if not GMAIL_AVAILABLE:
+                results.append("Google Calendar isn't connected sir.")
+                continue
+            try:
+                events = gmail_service.list_upcoming_events(days_ahead)
+                if not events:
+                    results.append("Nothing on your Google Calendar in that window sir.")
+                else:
+                    lines = [f'[{e["id"]}] {e["start"]}: "{e["summary"]}"' + (f" @ {e['location']}" if e["location"] else "") for e in events]
+                    results.append("Google Calendar:\n" + "\n".join(lines))
+            except Exception as e:
+                results.append(f"Google Calendar failed sir: {e}")
+        elif p == "outlook":
+            if not OUTLOOK_AVAILABLE:
+                results.append("Outlook Calendar isn't connected sir.")
+                continue
+            try:
+                events = outlook_service.list_upcoming_events(days_ahead)
+                if not events:
+                    results.append("Nothing on your Outlook Calendar in that window sir.")
+                else:
+                    lines = [f'[{e["id"]}] {e["start"]}: "{e["summary"]}"' + (f" @ {e['location']}" if e["location"] else "") for e in events]
+                    results.append("Outlook Calendar:\n" + "\n".join(lines))
+            except Exception as e:
+                results.append(f"Outlook Calendar failed sir: {e}")
+        else:
+            results.append(f"I don't recognize \"{p}\" as a calendar provider sir.")
+    return "\n".join(results)
+
+
+def update_calendar_event(event_id: str, provider: str = "gmail", title: str = "",
+                           start_iso: str = "", end_iso: str = "", description: str = "") -> str:
+    """Change an existing calendar event -- only pass the fields you want
+    changed, everything else stays as-is. `event_id` comes from
+    list_calendar_events' output. `provider` must be "gmail" or "outlook"
+    (not "both" -- an event id only belongs to one calendar)."""
+    provider = (provider or "gmail").strip().lower()
+    if provider == "gmail":
+        if not GMAIL_AVAILABLE:
+            return "Google Calendar isn't connected sir."
+        r = gmail_service.update_calendar_event(event_id, title, start_iso, end_iso, description)
+    elif provider == "outlook":
+        if not OUTLOOK_AVAILABLE:
+            return "Outlook Calendar isn't connected sir."
+        r = outlook_service.update_calendar_event(event_id, title, start_iso, end_iso, description)
+    else:
+        return f"I don't recognize \"{provider}\" as a calendar provider sir."
+    return "Updated sir." if r.get("ok") else f"Couldn't update that event sir: {r.get('error')}"
+
+
+def delete_calendar_event(event_id: str, provider: str = "gmail") -> str:
+    """Delete a calendar event. `event_id` comes from list_calendar_events'
+    output. `provider` must be "gmail" or "outlook"."""
+    provider = (provider or "gmail").strip().lower()
+    if provider == "gmail":
+        if not GMAIL_AVAILABLE:
+            return "Google Calendar isn't connected sir."
+        r = gmail_service.delete_calendar_event(event_id)
+    elif provider == "outlook":
+        if not OUTLOOK_AVAILABLE:
+            return "Outlook Calendar isn't connected sir."
+        r = outlook_service.delete_calendar_event(event_id)
+    else:
+        return f"I don't recognize \"{provider}\" as a calendar provider sir."
+    return "Deleted sir." if r.get("ok") else f"Couldn't delete that event sir: {r.get('error')}"
 
 
 # ================================================================ DISK
@@ -971,19 +1298,51 @@ def system_power(action: str, delay_minutes: float = 1) -> str:
     cancelled (call this again with action="cancel") -- only pass
     delay_minutes=0 if the user explicitly says "now"/"immediately". Note
     this will also stop Jarvis's own backend, since it runs on this same
-    machine."""
+    machine. If JARVIS_ADMIN_BOT_TOKEN is configured, shutdown/restart (not
+    cancel) first waits for an explicit yes/no approval over the dedicated
+    JarvisAdmin Telegram bot -- this call blocks until that's answered or
+    times out, so it can take a few minutes to return."""
     action = (action or "").strip().lower()
     if action not in ("shutdown", "restart", "cancel"):
         return f"I don't recognize '{action}' sir -- action must be shutdown, restart, or cancel."
 
+    if action in ("shutdown", "restart") and jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        when = "now" if delay_minutes == 0 else f"in {max(0.0, float(delay_minutes)):g} minute(s)"
+        approved, status = jarvis_admin.request_approval(f"{action} this PC {when}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't go ahead with that."
+
     shutdown_bin = "shutdown.exe" if IS_WINDOWS else "shutdown"
+    # On Linux, Jarvis's backend runs as an ordinary desktop user, and whether
+    # that user's session is considered "active" by polkit (and so gets a
+    # passwordless power-off/reboot) depends on exactly how/where the backend
+    # process was started -- unreliable to depend on, and a remote Telegram
+    # command has no way to answer a graphical polkit prompt if one appears.
+    # So this always goes through `sudo -n` on Linux instead: deterministic
+    # regardless of session context, and -n (non-interactive) means it fails
+    # fast with a clear stderr message rather than ever hanging on a prompt
+    # nobody can see. Requires a one-time NOPASSWD sudoers rule scoped to
+    # exactly this one binary -- see README's "Homelab" / shutdown setup.
+    _prefix = [] if IS_WINDOWS else ["sudo", "-n"]
+
+    def _detail(result):
+        detail = (result.stderr or result.stdout or "").strip()
+        low = detail.lower()
+        if "password is required" in low or "a terminal is required" in low or "authentication is required" in low:
+            return ("passwordless sudo for shutdown isn't set up yet -- see README's "
+                     "Homelab section for the one-time setup command.")
+        return detail or "unknown error"
 
     try:
         if action == "cancel":
-            cmd = [shutdown_bin, "/a"] if IS_WINDOWS else [shutdown_bin, "-c"]
+            cmd = [shutdown_bin, "/a"] if IS_WINDOWS else _prefix + [shutdown_bin, "-c"]
             result = subprocess.run(cmd, capture_output=True, timeout=10, text=True)
             if IS_WINDOWS and result.returncode != 0:
                 return "There wasn't a shutdown or restart scheduled to cancel, sir."
+            if not IS_WINDOWS and result.returncode != 0:
+                return f"I couldn't cancel that sir: {_detail(result)}"
             return "Cancelled the pending shutdown, sir."
 
         delay_minutes = max(0.0, float(delay_minutes))
@@ -994,12 +1353,11 @@ def system_power(action: str, delay_minutes: float = 1) -> str:
         else:
             when = "now" if delay_minutes == 0 else f"+{max(1, round(delay_minutes))}"
             flag = "-h" if action == "shutdown" else "-r"
-            cmd = [shutdown_bin, flag, when]
+            cmd = _prefix + [shutdown_bin, flag, when]
 
         result = subprocess.run(cmd, capture_output=True, timeout=10, text=True)
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            return f"I couldn't {action} the PC sir: {detail or 'unknown error'}"
+            return f"I couldn't {action} the PC sir: {_detail(result)}"
 
         verb = "Shutting down" if action == "shutdown" else "Restarting"
         if delay_minutes == 0:
@@ -1007,6 +1365,93 @@ def system_power(action: str, delay_minutes: float = 1) -> str:
         return f"{verb} in {delay_minutes:g} minute(s), sir. Say 'cancel shutdown' if you change your mind."
     except Exception as e:
         return f"I couldn't {action} the PC sir: {e}"
+
+
+def run_admin_action(description: str, command: str) -> str:
+    """Run ONE real system command that needs actual shell access -- an
+    install (`sudo apt install ffmpeg`, an npm/pip package), a config
+    change, an update/upgrade, or anything else run_diagnostic_command's
+    fixed read-only list can't cover. Use this whenever the user asks
+    Jarvis to install, run, upgrade, or otherwise DO something concrete on
+    this machine -- not just describe what could be done.
+
+    Every call first asks for explicit yes/no approval on the dedicated
+    JarvisAdmin Telegram bot, exactly like system_power's shutdown/restart
+    gate, and only runs if approved. This is the one deliberate exception
+    to this module's no-shell-exec rule (see the file header) -- the
+    safety property isn't a fixed command list here, it's that nothing
+    ever runs without an explicit human approval of the exact command,
+    every single time, on a separate channel from whatever asked for it.
+    Fails closed (refuses outright) if JarvisAdmin isn't configured --
+    never falls back to running unapproved.
+
+    `description` should read naturally after "Jarvis wants to " (e.g.
+    "install ffmpeg via apt"). `command` is the literal shell command that
+    will run -- shown verbatim in the approval prompt, so make it the real
+    command, not a paraphrase, since that's what's actually being
+    approved."""
+    command = (command or "").strip()
+    if not command:
+        return "What command should I run sir?"
+    if not jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        return ("JarvisAdmin isn't configured sir -- I can't run a real system action "
+                 "without a dedicated approval channel. See README's JarvisAdmin setup section.")
+
+    ask = (description or "").strip() or "run a command"
+    approved, status = jarvis_admin.request_approval(f"{ask}\n\nCommand: {command}")
+    if not approved:
+        if status == "timeout":
+            return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not running that."
+        return "Denied on JarvisAdmin sir -- I won't run that."
+
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                 timeout=600, cwd=os.path.expanduser("~"))
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        if len(output) > 1500:
+            output = output[-1500:]
+        status_line = (f"Done sir (exit {result.returncode})." if result.returncode == 0
+                        else f"That failed sir (exit {result.returncode}).")
+        return f"{status_line}\n{output}" if output else status_line
+    except subprocess.TimeoutExpired:
+        return "That command took too long sir, I stopped waiting -- it may still be running in the background."
+    except Exception as e:
+        return f"Something went wrong running that sir: {e}"
+
+
+# Fixed, narrow allowlist of hardening tools JarSecurity/the brain can
+# propose installing -- never free text, never a new sudo path. Each entry
+# is the literal, complete command that will run; propose_hardening_install
+# below only ever hands one of these exact strings to run_admin_action,
+# which is what actually gates it behind JarvisAdmin's Telegram approval.
+# aide's install bundles `aideinit` so its file-integrity baseline is set
+# immediately -- otherwise its first real check would flag everything.
+_HARDENING_INSTALLS = {
+    "fail2ban": "sudo apt-get install -y fail2ban",
+    "chkrootkit": "sudo apt-get install -y chkrootkit",
+    "aide": "sudo apt-get install -y aide && sudo aideinit",
+}
+
+
+def propose_hardening_install(tool_name: str) -> str:
+    """Propose installing one vetted homelab-security tool -- fail2ban
+    (bans IPs hammering exposed services), chkrootkit (a second, independent
+    rootkit scanner alongside rkhunter), or aide (file-integrity
+    monitoring). `tool_name` must be one of those three; anything else is
+    refused outright, never passed through. Routes through the existing
+    run_admin_action() -- same JarvisAdmin Telegram yes/no gate as any other
+    real system action, fails closed if that bot isn't configured. This
+    function never constructs a command itself, only looks one up from the
+    fixed _HARDENING_INSTALLS dict above, so there is no way for this to
+    become a general install-anything tool."""
+    tool_name = (tool_name or "").strip().lower()
+    command = _HARDENING_INSTALLS.get(tool_name)
+    if not command:
+        return (f"I don't have '{tool_name}' in my hardening-tool list sir -- I can propose: "
+                 + ", ".join(_HARDENING_INSTALLS))
+    if shutil.which(tool_name):
+        return f"{tool_name} is already installed sir."
+    return run_admin_action(f"install {tool_name} to improve homelab security", command)
 
 
 # ================================================================ TERMINAL / SYSTEM DIAGNOSTICS
@@ -1122,6 +1567,67 @@ def get_nas_status() -> str:
     return f"Your NAS is at {status['cpu_pct']:.0f} percent CPU{mem_note}{vol_note} sir."
 
 
+def export_folder_to_nas(name: str, location: str = "desktop") -> str:
+    """Upload a folder to your Synology NAS. `name` is the folder's name
+    inside one of the safe local directories (desktop, documents,
+    downloads, pictures, music, videos, creations); it's copied to the NAS
+    under a folder of the same name inside SYNOLOGY_BASE_PATH (a jailed
+    sync folder, never an arbitrary NAS path), overwriting any files
+    already there with the same name. Use this for "export/send/push/back
+    up the <folder> folder to the NAS"."""
+    if not synology_service.SYNOLOGY_AVAILABLE:
+        return "Your NAS isn't configured sir -- set SYNOLOGY_HOST/SYNOLOGY_USER/SYNOLOGY_PASSWORD in .env first."
+    target, err = _resolve_safe_path(name, location)
+    if err:
+        return err
+    if not os.path.isdir(target):
+        return f"I couldn't find a folder called {name} in {location} sir."
+    try:
+        result = synology_service.upload_folder(target, os.path.basename(target))
+    except Exception as e:
+        return f"I couldn't upload that to the NAS sir: {e}"
+    return f"Uploaded {result['files_uploaded']} file(s) to {result['folder_path']} on the NAS sir."
+
+
+def import_folder_from_nas(name: str, location: str = "desktop") -> str:
+    """Download a folder from your Synology NAS into one of the safe local
+    directories (desktop, documents, downloads, pictures, music, videos,
+    creations). `name` is looked up inside SYNOLOGY_BASE_PATH on the NAS
+    and copied into a same-named folder locally, overwriting any local
+    files with matching names. Use this for "grab/pull/import/sync the
+    <folder> folder from the NAS"."""
+    if not synology_service.SYNOLOGY_AVAILABLE:
+        return "Your NAS isn't configured sir -- set SYNOLOGY_HOST/SYNOLOGY_USER/SYNOLOGY_PASSWORD in .env first."
+    target, err = _resolve_safe_path(name, location)
+    if err:
+        return err
+    os.makedirs(target, exist_ok=True)
+    try:
+        result = synology_service.download_folder(_sanitize_name(name), target)
+    except Exception as e:
+        return f"I couldn't pull that from the NAS sir: {e}"
+    if result["files_downloaded"] == 0:
+        return f"There's nothing in {result['folder_path']} on the NAS sir -- nothing to pull."
+    return f"Pulled {result['files_downloaded']} file(s) from the NAS into {location} sir."
+
+
+def list_nas_folder(name: str = "") -> str:
+    """List what's inside a folder on your Synology NAS, relative to
+    SYNOLOGY_BASE_PATH (leave `name` blank for the top-level sync folder
+    itself). Use this for "what's in the NAS <folder> folder" type
+    questions, before deciding whether to pull it down."""
+    if not synology_service.SYNOLOGY_AVAILABLE:
+        return "Your NAS isn't configured sir -- set SYNOLOGY_HOST/SYNOLOGY_USER/SYNOLOGY_PASSWORD in .env first."
+    try:
+        entries = synology_service.list_folder(_sanitize_name(name))
+    except Exception as e:
+        return f"I couldn't reach your NAS sir: {e}"
+    if not entries:
+        return "That folder's empty, or doesn't exist yet, sir."
+    names = ", ".join(f"{e['name']}/" if e["is_dir"] else e["name"] for e in entries[:50])
+    return f"On the NAS: {names}"
+
+
 def check_internet_speed() -> str:
     """Run a real internet speed test right now (takes roughly 15-30
     seconds) and report download/upload speed and ping. Use this for "how's
@@ -1151,6 +1657,340 @@ def scan_network() -> str:
     return f"{len(result['devices'])} devices on your network sir, nothing new."
 
 
+def deep_scan_device(ip: str) -> str:
+    """Real port scan with service/version detection (nmap -sV) on ONE
+    device already seen on your LAN -- richer than scan_network's plain
+    ping sweep, telling you WHAT'S actually running on each open port
+    (e.g. "OpenSSH 8.9p1"), not just that the port is open. Works without
+    root. `ip` must already be a real address (from scan_network's device
+    list) -- validated as a literal IP before it ever reaches nmap."""
+    try:
+        ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return "I need a real IP address sir, from a device scan_network already found."
+    nmap = shutil.which("nmap")
+    if not nmap:
+        return "nmap isn't installed sir -- run: sudo apt install nmap."
+    try:
+        result = subprocess.run(
+            [nmap, "-sV", "--version-intensity", "0", "-T4", "--top-ports", "100", "-Pn", ip.strip()],
+            capture_output=True, text=True, timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        return "That scan took too long sir, I stopped waiting."
+    open_lines = [l for l in result.stdout.splitlines() if "/tcp" in l and "open" in l]
+    if not open_lines:
+        return f"No open ports found on {ip} sir (top 100, TCP)."
+    return f"{ip} sir:\n" + "\n".join(open_lines[:20])
+
+
+def scan_file_for_malware(name: str, location: str = "downloads") -> str:
+    """Run a REAL ClamAV virus/malware scan (not a placeholder) on one file
+    or folder under a safe named location -- same locations as
+    create_folder/read_text_file: desktop, documents, downloads, pictures,
+    music, videos, creations. Uses whatever signature database is
+    currently installed (clamav-freshclam keeps it updated automatically
+    in the background if that service is running). Can take a while for a
+    large folder."""
+    target, err = _resolve_safe_path(name, location)
+    if err:
+        return err
+    if not os.path.exists(target):
+        return f"I can't find {name} in {location} sir."
+    clamscan = shutil.which("clamscan")
+    if not clamscan:
+        return "ClamAV isn't installed sir -- run: sudo apt install clamav."
+    try:
+        result = subprocess.run([clamscan, "-r", "--no-summary", target],
+                                 capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return "That scan took too long sir, I stopped waiting."
+    infected = [l for l in (result.stdout or "").splitlines() if l.rstrip().endswith("FOUND")]
+    if infected:
+        return f"Found {len(infected)} infected file(s) sir:\n" + "\n".join(infected[:10])
+    return f"Clean sir -- no threats found in {name}."
+
+
+def _sudo_n(argv, timeout):
+    """Try a command with non-interactive sudo (-n) -- fails INSTANTLY
+    rather than ever hanging on a password prompt nobody can answer, which
+    is exactly what happens if passwordless sudo isn't configured for that
+    exact command. Returns (CompletedProcess, had_password_prompt) so
+    callers can fall back to a plain non-root invocation specifically when
+    sudo itself refused for lack of a NOPASSWD rule -- not when the
+    command's own real error is something else. See the README's
+    "Real actions from your phone" section for how to add a scoped
+    NOPASSWD rule for a specific diagnostic command."""
+    try:
+        r = subprocess.run(["sudo", "-n"] + argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return None, True
+    err = (r.stderr or "").lower()
+    # Verified live on this machine: a NOPASSWD-less `sudo -n` here says
+    # "interactive authentication is required", not the more commonly-
+    # documented "a password is required" -- checking for both (and the
+    # no-tty variant some sudo builds use) rather than trusting one exact
+    # string across every sudo version/build.
+    needs_password = r.returncode == 1 and (
+        "password is required" in err or "no tty present" in err or "authentication is required" in err
+    )
+    return r, needs_password
+
+
+def get_disk_health(device: str = "") -> str:
+    """Real S.M.A.R.T. health data (overall health, temperature, power-on
+    hours) for a drive physically attached to THIS machine -- not the NAS
+    (see get_nas_status for that), and not any spare/unmounted drive that
+    isn't actually connected here (there's no way to read SMART data over
+    the network for a drive that isn't plugged into some machine Jarvis is
+    running on). `device` is the short name from `smartctl --scan` (e.g.
+    "nvme0", "sda") -- leave blank to auto-detect and report on every
+    attached drive. Tries passwordless sudo first (works once the scoped
+    NOPASSWD rule from the README is set up), falls back to a plain
+    permission-denied message otherwise -- never hangs on a password
+    prompt either way."""
+    smartctl = shutil.which("smartctl")
+    if not smartctl:
+        return "smartmontools isn't installed sir -- run: sudo apt install smartmontools."
+
+    devices = [device.strip()] if (device or "").strip() else []
+    if not devices:
+        try:
+            scan = subprocess.run([smartctl, "--scan"], capture_output=True, text=True, timeout=10)
+            devices = [line.split()[0].replace("/dev/", "") for line in scan.stdout.splitlines() if line.strip()]
+        except Exception as e:
+            return f"Couldn't list drives sir: {e}"
+    if not devices:
+        return "No drives found attached to this machine sir."
+
+    results = []
+    for dev in devices:
+        if not re.match(r"^[A-Za-z0-9]+$", dev):
+            results.append(f"{dev}: skipped, not a plain device name")
+            continue
+        try:
+            r, needs_password = _sudo_n([smartctl, "-a", f"/dev/{dev}"], 15)
+            out = (r.stdout or r.stderr or "") if r else ""
+            if needs_password or r is None:
+                r2 = subprocess.run([smartctl, "-a", f"/dev/{dev}"], capture_output=True, text=True, timeout=15)
+                out = r2.stdout or r2.stderr or ""
+        except Exception as e:
+            results.append(f"{dev}: error ({e})")
+            continue
+        if "Permission denied" in out:
+            results.append(f"{dev}: permission denied -- see README's NOPASSWD setup for real SMART data")
+            continue
+        health_m = re.search(r"(?:SMART overall-health self-assessment test result|SMART Health Status):\s*(\S+)", out)
+        temp_m = re.search(r"Temperature.*?:\s*(\d+)", out)
+        hours_m = re.search(r"Power_On_Hours.*?\s(\d+)\s*$", out, re.MULTILINE)
+        entry = dev + ": " + (health_m.group(1) if health_m else "unknown")
+        if temp_m:
+            entry += f", {temp_m.group(1)}°C"
+        if hours_m:
+            entry += f", {hours_m.group(1)} hours on"
+        results.append(entry)
+    return "; ".join(results) + " sir."
+
+
+def test_lan_throughput(target_host: str) -> str:
+    """Real LAN throughput test (iperf3 client) between this PC and another
+    device on your network -- distinct from check_internet_speed, which
+    only measures internet bandwidth; this measures your actual local
+    network speed. The OTHER device needs iperf3 installed and its server
+    already running there first (`iperf3 -s`) -- this only ever connects
+    as a client, it never starts a server itself. Fails with a clear
+    connection error if nothing's listening at target_host."""
+    iperf3 = shutil.which("iperf3")
+    if not iperf3:
+        return "iperf3 isn't installed sir -- run: sudo apt install iperf3."
+    target_host = (target_host or "").strip()
+    if not target_host or not _HOSTNAME_RE.match(target_host):
+        return "I need a plain hostname or IP address sir."
+    try:
+        result = subprocess.run([iperf3, "-c", target_host, "-t", "5", "-J"],
+                                 capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return "That test took too long sir, I stopped waiting."
+    try:
+        data = json.loads(result.stdout)
+    except Exception:
+        err = (result.stderr or result.stdout or "unknown error").strip()
+        return f"Couldn't reach an iperf3 server on {target_host} sir -- make sure `iperf3 -s` is running there. ({err[:200]})"
+    if "error" in data:
+        return f"iperf3 error sir: {data['error']}"
+    mbps = data.get("end", {}).get("sum_received", {}).get("bits_per_second", 0) / 1_000_000
+    return f"{mbps:.0f} Mbps sir, between this PC and {target_host}."
+
+
+def get_live_system_snapshot() -> str:
+    """Real, detailed live snapshot of THIS machine right now -- per-core
+    CPU load, memory breakdown, 1/5/15-minute load averages, per-network-
+    interface throughput, and root filesystem usage -- richer and more
+    real-time than check_system_health's periodic thermal/disk check.
+    Backed by glances' one-shot JSON export; not a placeholder."""
+    glances = shutil.which("glances")
+    if not glances:
+        return "glances isn't installed sir -- run: sudo apt install glances."
+    try:
+        result = subprocess.run(
+            [glances, "--stdout-json", "now,cpu,mem,load,network,fs", "--stop-after", "1", "-t", "1"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return "That took too long sir, I stopped waiting."
+    try:
+        data = json.loads(result.stdout.strip())
+    except Exception:
+        return f"Couldn't read glances output sir: {(result.stderr or '')[:300]}"
+    cpu, mem, load = data.get("cpu", {}), data.get("mem", {}), data.get("load", {})
+    fs = data.get("fs", []) or []
+    root_fs = next((f for f in fs if f.get("mnt_point") == "/"), fs[0] if fs else {})
+    return (
+        f"CPU {cpu.get('total', 0):.0f}% across {cpu.get('cpucore', '?')} cores, "
+        f"load {load.get('min1', 0):.2f}/{load.get('min5', 0):.2f}/{load.get('min15', 0):.2f}, "
+        f"memory {mem.get('percent', 0):.0f}% used, "
+        f"disk {root_fs.get('percent', 0):.0f}% used on {root_fs.get('mnt_point', '/')} sir."
+    )
+
+
+def run_security_audit() -> str:
+    """Real system hardening audit (lynis) -- a hardening index score plus
+    concrete warnings and suggestions, read from lynis's own machine-
+    readable report after a real scan. Tries passwordless sudo first for
+    the FULL root-level audit (works once the scoped NOPASSWD rule from
+    the README is set up); falls back to a non-root run otherwise, where
+    root-only checks are simply skipped rather than failing. A full
+    root-level --quick audit on a machine with a lot installed (many
+    Docker containers, services, etc.) has been observed taking several
+    minutes -- can call this on demand, but it's mainly meant to run
+    unattended (see jarvis.py's daily _deep_security_watcher_thread),
+    where that's not a concern."""
+    lynis = shutil.which("lynis")
+    if not lynis:
+        return "lynis isn't installed sir -- run: sudo apt install lynis."
+    # Fixed filename (not randomized) so the sudoers rules below that read
+    # and clean it up can name it exactly, with no wildcard -- this sudo
+    # build rejects mid-argument wildcards entirely (see get_disk_health's
+    # smartctl rule). Lives in ~/.jarvis, which only tyler-kennedy can
+    # write into, so a fixed path here can't be pre-planted by another
+    # local user the way a fixed path in world-writable /tmp could.
+    report_path = os.path.join(JARVIS_DIR, "lynis_report.dat")
+    lynis_argv = [lynis, "audit", "system", "--quick", "--no-colors", "--no-log", "--report-file", report_path]
+    try:
+        _r, needs_password = _sudo_n(lynis_argv, 600)
+        if needs_password:
+            subprocess.run(lynis_argv, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return "That audit took too long sir, I stopped waiting -- it may have made partial progress."
+    if not os.path.exists(report_path):
+        return "Lynis didn't produce a report sir -- something went wrong running it."
+
+    # A root-run report file is owned by root -- read it back through sudo
+    # too if a plain open() can't (still non-interactive, still never hangs
+    # on a password prompt; if that ALSO fails there's genuinely no way to
+    # read it back, and we say so rather than crash). Needs its own
+    # jarvis-diagnostics sudoers line (README) since running lynis as root
+    # doesn't by itself grant reading its root-owned output back.
+    warnings, suggestions, hardening_index = [], [], None
+    try:
+        with open(report_path, "r", encoding="utf-8", errors="replace") as f:
+            report_lines = f.readlines()
+    except PermissionError:
+        cat_r, cat_needs_password = _sudo_n(["cat", report_path], 15)
+        if cat_needs_password or cat_r is None:
+            return "Lynis's report was written as root and I can't read it back sir -- see the README's NOPASSWD setup."
+        report_lines = (cat_r.stdout or "").splitlines(keepends=True)
+    try:
+        for line in report_lines:
+            line = line.strip()
+            if line.startswith("warning[]="):
+                parts = line.split("=", 1)[1].split("|")
+                warnings.append(parts[1] if len(parts) > 1 else parts[0])
+            elif line.startswith("suggestion[]="):
+                parts = line.split("=", 1)[1].split("|")
+                suggestions.append(parts[1] if len(parts) > 1 else parts[0])
+            elif line.startswith("hardening_index="):
+                hardening_index = line.split("=", 1)[1]
+    finally:
+        try:
+            os.remove(report_path)
+        except OSError:
+            _sudo_n(["rm", "-f", report_path], 5)  # best-effort if it's root-owned
+
+    global LAST_AUDIT_RESULT
+    LAST_AUDIT_RESULT = {
+        "hardening_index": hardening_index, "warnings": warnings, "suggestions": suggestions,
+    }
+
+    parts = [f"hardening index {hardening_index or '–'}/100"]
+    parts.append(f"{len(warnings)} warning(s)" + (": " + "; ".join(warnings[:5]) if warnings else ""))
+    parts.append(f"{len(suggestions)} suggestion(s), top ones: " + "; ".join(suggestions[:5]) if suggestions else "0 suggestions")
+    return "; ".join(parts) + " sir."
+
+
+def run_rootkit_scan() -> str:
+    """Real rootkit/backdoor scan (rkhunter --check) -- checks system
+    binaries and known locations against rkhunter's rootkit signature
+    database. Needs root for almost everything it does: tries passwordless
+    sudo first (works once the scoped NOPASSWD rule from the README is set
+    up), and returns a clear message -- never a hang -- if that isn't
+    configured yet. Can take a couple of minutes; safe to call anytime on
+    demand."""
+    rkhunter = shutil.which("rkhunter")
+    if not rkhunter:
+        return "rkhunter isn't installed sir -- run: sudo apt install rkhunter."
+    argv = [rkhunter, "--check", "--sk", "--nocolors"]
+    try:
+        r, needs_password = _sudo_n(argv, 180)
+    except subprocess.TimeoutExpired:
+        return "That scan took too long sir, I stopped waiting."
+    if needs_password or r is None:
+        return ("I need root for a real rootkit scan sir, and passwordless sudo isn't set up for "
+                "rkhunter yet -- see the README's NOPASSWD setup, or ask me to run_admin_action the sudo version once.")
+    out = (r.stdout or "") + (r.stderr or "")
+    warnings = [l.strip() for l in out.splitlines() if "warning" in l.lower() and ":" in l]
+
+    global LAST_ROOTKIT_RESULT
+    LAST_ROOTKIT_RESULT = {"warnings": warnings}
+
+    if warnings:
+        return f"{len(warnings)} warning(s) sir:\n" + "\n".join(warnings[:10])
+    return "Clean sir -- no rootkit warnings found."
+
+
+def log_deep_scan_result() -> dict:
+    """Logs the most recent run_security_audit()/run_rootkit_scan() results
+    (from LAST_AUDIT_RESULT/LAST_ROOTKIT_RESULT) as one deep_scan entry in
+    security_log.jsonl, distinct from run_security_check()'s regular
+    4-hour sweep entries (security_status_report() filters on the
+    "deep_scan" flag to report them separately). Called once daily by
+    jarvis.py's deep-scan watcher thread, after both scans have run.
+    Returns {"critical", "summary"} so the caller can decide whether to
+    alert -- critical means a REAL lynis warning (not a suggestion) or any
+    rkhunter warning, not just "the scan ran successfully"."""
+    lynis_warnings = LAST_AUDIT_RESULT.get("warnings") or []
+    lynis_suggestions = LAST_AUDIT_RESULT.get("suggestions") or []
+    hardening_index = LAST_AUDIT_RESULT.get("hardening_index")
+    rkhunter_warnings = LAST_ROOTKIT_RESULT.get("warnings") or []
+
+    critical = bool(lynis_warnings) or bool(rkhunter_warnings)
+    _log_security_event({
+        "deep_scan": True,
+        "lynis_hardening_index": hardening_index,
+        "lynis_warnings": len(lynis_warnings), "lynis_warning_list": lynis_warnings[:10],
+        "lynis_suggestions": len(lynis_suggestions),
+        "rkhunter_warnings": len(rkhunter_warnings), "rkhunter_warning_list": rkhunter_warnings[:10],
+        "critical": critical,
+    })
+    summary = (f"deep scan: hardening index {hardening_index or '–'}/100, "
+               f"{len(lynis_warnings)} lynis warning(s), {len(rkhunter_warnings)} rkhunter warning(s)")
+    if lynis_warnings:
+        summary += "\nlynis: " + "; ".join(lynis_warnings[:5])
+    if rkhunter_warnings:
+        summary += "\nrkhunter: " + "; ".join(rkhunter_warnings[:5])
+    return {"critical": critical, "summary": summary}
+
+
 # ================================================================ SECURITY (JarSecurity)
 SECURITY_LOG_PATH = os.path.join(JARVIS_DIR, "security_log.jsonl")
 
@@ -1171,6 +2011,13 @@ _SUSPICIOUS_EXEC_DIRS = ("/tmp/", "/dev/shm/", "/var/tmp/")
 # callers (e.g. jarvis.py's security-watcher thread) branch on whether it
 # was critical without re-parsing the human-readable reply string.
 LAST_SECURITY_RESULT = {}
+
+# Structured results of the most recent run_security_audit()/
+# run_rootkit_scan() calls -- same pattern as LAST_SECURITY_RESULT above,
+# so jarvis.py's deep-scan watcher thread can log real numbers instead of
+# re-parsing the human-readable return string.
+LAST_AUDIT_RESULT = {}
+LAST_ROOTKIT_RESULT = {}
 
 
 def _log_security_event(entry):
@@ -1226,11 +2073,43 @@ def _find_suspicious_processes():
     return hits
 
 
+def _classify_bind_scope(addr, tailscale_ip=None):
+    """Classifies a "host:port"-style bind address (as ss -tulpn/netstat
+    prints it) into "loopback" / "tailscale" / "exposed". "exposed" means
+    reachable from the LAN or WAN -- anything that isn't explicitly
+    loopback or this host's own Tailscale address. Never guesses: an
+    unrecognized or malformed address is treated as exposed rather than
+    silently trusted -- this is what lets run_security_check() catch a
+    service accidentally bound to 0.0.0.0 the same way the manual port
+    audit did (see the Grafana/Ollama/uptime-kuma findings)."""
+    host = addr
+    if host.startswith("["):
+        host = host.split("]", 1)[0][1:]
+    else:
+        host = host.rsplit(":", 1)[0]
+    host = host.split("%", 1)[0]  # drop a %iface suffix, e.g. 127.0.0.53%lo
+
+    if host in ("*", "0.0.0.0", "::", ""):
+        return "exposed"
+    if host == "127.0.0.1" or host.startswith("127.") or host == "::1":
+        return "loopback"
+    if tailscale_ip and host == tailscale_ip:
+        return "tailscale"
+    if host.startswith("fd7a:115c:a1e0:"):  # this project's tailnet's IPv6 ULA prefix
+        return "tailscale"
+    if re.match(r"^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.", host):  # 100.64.0.0/10, Tailscale's CGNAT range
+        return "tailscale"
+    return "exposed"
+
+
 def _open_listening_ports():
-    """Parsed list of unique local address:port entries currently
-    LISTENing, via the same read-only diagnostic commands
-    run_diagnostic_command already exposes (ss -tulpn / netstat -an) --
-    report-only, never touches or closes anything."""
+    """Structured list of {addr, port, proto, scope, process} for every
+    currently-LISTENing local socket, via the same read-only diagnostic
+    commands run_diagnostic_command already exposes (ss -tulpn /
+    netstat -an) -- report-only, never touches or closes anything. `scope`
+    (see _classify_bind_scope above) is what lets run_security_check()
+    and JarSecurity's alert tell a normal loopback/Tailscale-bound service
+    apart from one actually reachable off this machine."""
     entry = _DIAGNOSTIC_COMMANDS.get("listening_ports")
     if not entry:
         return []
@@ -1238,23 +2117,56 @@ def _open_listening_ports():
         out = subprocess.run(entry[0], capture_output=True, text=True, timeout=15).stdout
     except Exception:
         return []
+
+    tailscale_ip = None
+    if tailscale_service.TAILSCALE_AVAILABLE:
+        try:
+            tailscale_ip = tailscale_service.get_status().get("self_ip")
+        except Exception:
+            tailscale_ip = None
+
     ports, seen = [], set()
     for line in out.splitlines():
         parts = line.split()
         if IS_WINDOWS:
             if len(parts) >= 4 and parts[0] in ("TCP", "UDP") and "LISTENING" in line.upper():
-                addr = parts[1]
+                proto, addr, process = parts[0].lower(), parts[1], ""
             else:
                 continue
         else:
             if len(parts) >= 5 and parts[1] == "LISTEN":
-                addr = parts[4]
+                proto, addr = parts[0], parts[4]
+                m = re.search(r'users:\(\("([^"]+)"', line)
+                process = m.group(1) if m else ""
             else:
                 continue
-        if addr not in seen:
-            seen.add(addr)
-            ports.append(addr)
+        if addr in seen:
+            continue
+        seen.add(addr)
+        host_port = addr.rsplit(":", 1)
+        port = host_port[1] if len(host_port) == 2 else ""
+        ports.append({
+            "addr": addr, "port": port, "proto": proto,
+            "scope": _classify_bind_scope(addr, tailscale_ip),
+            "process": process,
+        })
     return ports
+
+
+def _format_port_detail(ports):
+    """Human-readable port table -- one source of truth shared by the
+    Telegram alert text (run_security_check) and JarSecurity's grounded
+    chat report (security_status_report), so "what ports are open" gets
+    the same real detail either way instead of two different summaries."""
+    if not ports:
+        return "no listening ports found"
+    exposed = [p for p in ports if p["scope"] == "exposed"]
+    lines = []
+    for p in sorted(ports, key=lambda p: (p["scope"] != "exposed", p["addr"])):
+        proc = f" ({p['process']})" if p["process"] else ""
+        lines.append(f"  {p['addr']}/{p['proto']} -- {p['scope']}{proc}")
+    header = f"{len(ports)} listening port(s), {len(exposed)} exposed (LAN/WAN-reachable)"
+    return header + ":\n" + "\n".join(lines)
 
 
 def _check_firmware_and_drivers():
@@ -1307,19 +2219,73 @@ def check_firmware_drivers() -> str:
     return f"Firmware/driver check sir: {note}."
 
 
+def _check_dependency_vulnerabilities():
+    """Read-only dependency vulnerability check -- report-only, same
+    philosophy as _check_firmware_and_drivers: never upgrades anything
+    itself, just flags what's known-vulnerable against the public
+    advisory databases (pip-audit uses the Python Packaging Advisory
+    Database; npm audit uses the npm registry's own advisory data).
+    Checks this project's actual installed Python packages (via
+    `sys.executable -m pip_audit`, so it's always the same interpreter/venv
+    Jarvis itself runs in) and its Node dependencies (`npm audit`, in this
+    project's own directory). Returns (summary_text, flagged)."""
+    parts = []
+    flagged = False
+
+    try:
+        proc = subprocess.run([sys.executable, "-m", "pip_audit", "--format", "json"],
+                               capture_output=True, text=True, timeout=90)
+        if proc.stdout.strip():
+            data = json.loads(proc.stdout)
+            vulns = [v for pkg in data.get("dependencies", []) for v in (pkg.get("vulns") or [])]
+            if vulns:
+                flagged = True
+                parts.append(f"pip: {len(vulns)} known vulnerabilit{'y' if len(vulns) == 1 else 'ies'}")
+            else:
+                parts.append("pip: clean")
+        else:
+            parts.append(f"pip: unavailable ({(proc.stderr or 'no output').strip()[:80]})")
+    except FileNotFoundError:
+        parts.append("pip: pip-audit not installed (pip install pip-audit)")
+    except Exception as e:
+        parts.append(f"pip: unavailable ({e})")
+
+    npm_bin = shutil.which("npm")
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    if npm_bin:
+        try:
+            proc = subprocess.run([npm_bin, "audit", "--omit=dev", "--json"],
+                                   cwd=project_dir, capture_output=True, text=True, timeout=60)
+            data = json.loads(proc.stdout) if proc.stdout.strip() else {}
+            total = (data.get("metadata", {}) or {}).get("vulnerabilities", {}).get("total", 0)
+            if total:
+                flagged = True
+                parts.append(f"npm: {total} known vulnerabilit{'y' if total == 1 else 'ies'}")
+            else:
+                parts.append("npm: clean")
+        except Exception as e:
+            parts.append(f"npm: unavailable ({e})")
+    else:
+        parts.append("npm: unavailable -- npm not found")
+
+    return "; ".join(parts), flagged
+
+
 def run_security_check() -> str:
     """JarSecurity sub-agent's core sweep: lists listening TCP/UDP ports,
     flags any running process matching a curated list of known
     cryptominer/backdoor names or executing out of a world-writable temp
     directory, re-runs the same LAN scan scan_network() already does
     (flagging brand-new devices as possible intruders), flags outdated
-    device firmware/drivers (see check_firmware_drivers), refreshes the
-    local malicious-link blocklist used by open_website/search_web/
-    scan_url_safety, and verifies -- installing if missing -- each vetted
-    browser security/privacy extension (uBlock Origin Lite, DuckDuckGo
-    Privacy Essentials) in the dedicated Jarvis browser window. Every run is
-    logged to ~/.jarvis/security_log.jsonl. Safe to call anytime on demand;
-    also runs automatically in the background on a fixed schedule."""
+    device firmware/drivers (see check_firmware_drivers), flags known
+    vulnerabilities in this project's own Python/Node dependencies (pip-audit
+    + npm audit), refreshes the local malicious-link blocklist used by
+    open_website/search_web/scan_url_safety, and verifies -- installing if
+    missing -- each vetted browser security/privacy extension (uBlock Origin
+    Lite, DuckDuckGo Privacy Essentials) in the dedicated Jarvis browser
+    window. Every run is logged to ~/.jarvis/security_log.jsonl. Safe to
+    call anytime on demand; also runs automatically in the background on a
+    fixed schedule."""
     global LAST_SECURITY_RESULT
     ports = _open_listening_ports()
     suspicious = _find_suspicious_processes()
@@ -1328,8 +2294,10 @@ def run_security_check() -> str:
     net_error = net.get("error", "")
     new_count = net.get("new_count", 0) if not net_error else 0
     device_count = len(net.get("devices", [])) if not net_error else 0
+    new_device_list = [d for d in net.get("devices", []) if d.get("new")] if not net_error else []
 
     firmware_note, firmware_flagged = _check_firmware_and_drivers()
+    dependency_note, dependency_flagged = _check_dependency_vulnerabilities()
 
     blocklist_result = refresh_threat_blocklist()
     if blocklist_result.get("ok"):
@@ -1357,9 +2325,11 @@ def run_security_check() -> str:
         ublock_summary = "uBlock Origin Lite unavailable -- browser control module isn't available"
         ddg_summary = "DuckDuckGo Privacy Essentials unavailable -- browser control module isn't available"
 
-    critical = bool(suspicious) or new_count > 0
+    exposed_ports = [p for p in ports if p["scope"] == "exposed"]
+    critical = bool(suspicious) or new_count > 0 or dependency_flagged or bool(exposed_ports)
 
-    summary_parts = [f"{len(ports)} listening port{'s' if len(ports) != 1 else ''}"]
+    summary_parts = [f"{len(ports)} listening port{'s' if len(ports) != 1 else ''}"
+                      + (f", {len(exposed_ports)} EXPOSED (LAN/WAN-reachable)" if exposed_ports else ", none exposed")]
     if suspicious:
         summary_parts.append(
             f"{len(suspicious)} suspicious process{'es' if len(suspicious) != 1 else ''} flagged: "
@@ -1374,19 +2344,27 @@ def run_security_check() -> str:
     else:
         summary_parts.append(f"{device_count} known devices on the LAN, nothing new")
     summary_parts.append(f"firmware/drivers: {firmware_note}")
+    summary_parts.append(f"dependencies: {dependency_note}")
     summary_parts.append(f"threat blocklist: {blocklist_note}")
     summary_parts.append(ublock_summary)
     summary_parts.append(ddg_summary)
     result_text = "; ".join(summary_parts) + "."
+    if exposed_ports:
+        result_text += "\n" + _format_port_detail(exposed_ports)
 
     LAST_SECURITY_RESULT = {
-        "critical": critical, "open_ports": len(ports), "suspicious": suspicious,
-        "new_devices": new_count, "firmware_flagged": firmware_flagged,
+        "critical": critical, "open_ports": len(ports), "ports": ports, "exposed_ports": len(exposed_ports),
+        "suspicious": suspicious,
+        "new_devices": new_count, "new_device_list": new_device_list,
+        "firmware_flagged": firmware_flagged,
+        "dependency_flagged": dependency_flagged,
         "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
     }
     _log_security_event({
-        "open_ports": len(ports), "suspicious": suspicious, "new_devices": new_count,
-        "firmware_flagged": firmware_flagged, "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
+        "open_ports": len(ports), "ports": ports, "exposed_ports": len(exposed_ports),
+        "suspicious": suspicious, "new_devices": new_count,
+        "firmware_flagged": firmware_flagged, "dependency_flagged": dependency_flagged,
+        "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
         "critical": critical,
     })
     return result_text
@@ -1544,16 +2522,27 @@ def tailscale_disconnect() -> str:
 # ================================================================ FINANCE (unchanged services, thin wrappers)
 def sync_bank_data() -> str:
     """Sync the latest bank transactions into Jarvis's records. Call this on
-    any "sync statements", "sync my bank data", or "import my statements"
-    request. First imports whatever file(s) the user has most recently sent
-    (as a document or a screenshot/photo) to the Telegram bot into the
-    "latest bank statements" folder, then parses every statement file found
-    there (plus anything dropped directly in JarvisStatements) into the
-    local transaction store that get_spending_summary reads from --
-    whatever the format (CSV, TXT, PDF, XLSX/XLS, OFX/QFX, a screenshot, or
-    a ZIP bundling any of those) and whatever it's named."""
+    any "sync statements", "sync my bank data", "grab my bank statements
+    from the NAS", or "import my statements" request. Pulls in new files
+    from up to two sources before parsing: (1) if the NAS is configured,
+    whatever's in the "Bank Statements" folder under SYNOLOGY_BASE_PATH on
+    the Synology NAS -- drop CSVs there from any device and this picks them
+    up automatically; (2) whatever file(s) the user most recently sent (as
+    a document or a screenshot/photo) to the Telegram bot. Then parses
+    every statement file found in JarvisStatements (including both of the
+    above, plus anything dropped there directly) into the local
+    transaction store that get_spending_summary reads from -- whatever the
+    format (CSV, TXT, PDF, XLSX/XLS, OFX/QFX, a screenshot, or a ZIP
+    bundling any of those) and whatever it's named."""
     if not STATEMENTS_AVAILABLE:
         return "Statement syncing isn't set up sir."
+    nas_pulled = 0
+    if synology_service.SYNOLOGY_AVAILABLE:
+        try:
+            nas_result = synology_service.download_folder("Bank Statements", statements_service.STATEMENTS_DIR)
+            nas_pulled = nas_result["files_downloaded"]
+        except Exception as e:
+            print(f"  [Statements] NAS pull error: {e}")
     imported = []
     if TELEGRAM_AVAILABLE:
         try:
@@ -1565,10 +2554,16 @@ def sync_bank_data() -> str:
     except Exception as e:
         return f"I couldn't sync your statements sir: {e}"
     if result["files_seen"] == 0:
-        return ("I didn't find any statement files to sync sir. Send one to the Telegram bot "
-                 "(CSV, TXT, PDF, XLSX, OFX/QFX, a screenshot, or a ZIP) or drop it in the "
-                 "JarvisStatements folder first.")
-    prefix = f"Imported {len(imported)} file(s) you sent over Telegram and synced sir. " if imported else "Synced sir. "
+        return ("I didn't find any statement files to sync sir. Drop one in the NAS's "
+                 "Bank Statements folder, send it to the Telegram bot (CSV, TXT, PDF, XLSX, "
+                 "OFX/QFX, a screenshot, or a ZIP), or drop it in the JarvisStatements folder "
+                 "directly.")
+    sources = []
+    if nas_pulled:
+        sources.append(f"{nas_pulled} file(s) from the NAS")
+    if imported:
+        sources.append(f"{len(imported)} file(s) from Telegram")
+    prefix = f"Pulled {' and '.join(sources)} and synced sir. " if sources else "Synced sir. "
     return f"{prefix}Found {result['new_transactions']} new transactions across {result['files_seen']} files."
 
 
@@ -1677,6 +2672,26 @@ def build_finance_dashboard() -> str:
         "recurring charges/subscriptions."
     )
     return build_creation(description, kind="dashboard")
+
+
+def _finance_watcher_check() -> list:
+    """Not an MCP tool -- called directly by jarvis.py's _finance_watcher_thread
+    (same relationship check_system_health has to _health_watcher_thread).
+    Syncs whatever new bank data is waiting (NAS + Telegram inbox, same as a
+    user-initiated "sync my bank data") and returns
+    statements_service.check_spending_anomalies()'s result -- empty if
+    nothing's new/notable, or if statement syncing isn't set up at all."""
+    if not STATEMENTS_AVAILABLE:
+        return []
+    try:
+        sync_bank_data()
+    except Exception as e:
+        print(f"  [FinanceWatch] Sync error: {e}")
+    try:
+        return statements_service.check_spending_anomalies()
+    except Exception as e:
+        print(f"  [FinanceWatch] Anomaly check error: {e}")
+        return []
 
 
 # ================================================================ EYES (screen vision, off by default, on-demand only)
@@ -1811,6 +2826,54 @@ def delete_note(text: str) -> str:
     return f"Deleted the note: {matches[0]['text']} sir."
 
 
+# ================================================================ LONG-TERM MEMORY
+# Distinct from notes above: notes are a plain explicit list the user
+# manages directly; memory is searchable (memory_store.recall's FTS5
+# ranking) and partly self-maintaining -- most of what ends up here comes
+# from brain.py's passive per-turn capture (memory_store.maybe_capture),
+# not just what the user explicitly asks to remember.
+def remember_this(text: str) -> str:
+    """Explicitly save something to Jarvis's long-term memory -- a
+    preference, a fact, a standing instruction -- so it can be recalled in
+    future conversations, potentially days or weeks later (this is real
+    persistent memory, not the short rolling conversation-recap window).
+    Use this whenever the user says "remember that...", "keep in mind
+    that...", or clearly states something they want you to retain going
+    forward. Jarvis also passively captures durable facts from ordinary
+    conversation on its own -- this tool is for when the user explicitly
+    asks."""
+    if not text or not text.strip():
+        return "What should I remember sir?"
+    memory_store.remember(text.strip(), category="fact")
+    return f"I'll remember that sir: {text.strip()}"
+
+
+def recall_memory(query: str) -> str:
+    """Search Jarvis's long-term memory for anything relevant to a topic --
+    use this whenever answering the user might benefit from something
+    remembered from a past conversation (a stated preference, a fact about
+    them, a prior decision) that isn't already in the current
+    conversation's recap. Most everyday commands don't need this; reach
+    for it when the user references something from "before" or asks what
+    you know/remember about a topic."""
+    if not query or not query.strip():
+        return "What should I search for sir?"
+    hits = memory_store.recall(query.strip(), limit=5)
+    if not hits:
+        return "I don't have anything remembered on that sir."
+    return "Here's what I remember sir: " + " / ".join(h["text"] for h in hits)
+
+
+def list_recent_memories() -> str:
+    """List the most recent things Jarvis has remembered, newest first --
+    use this for "what do you remember about me" / "what have you learned
+    about me" type requests."""
+    hits = memory_store.recent(10)
+    if not hits:
+        return "I don't have anything in long-term memory yet sir."
+    return "Recent memory sir: " + "; ".join(h["text"] for h in hits)
+
+
 def due_reminders():
     """Not an MCP tool -- called directly by jarvis.py's background watcher
     thread. Returns and clears any reminders whose time has come."""
@@ -1916,7 +2979,8 @@ def notify_creation_ready(payload: dict):
     """Not an MCP tool -- called once per successful build_creation() (or
     build_finance_dashboard(), which returns the same payload shape) by
     whichever caller is running inside jarvis.py's own long-lived process:
-    jarvis.py's _on_brain_creation for the interactive voice/chat path.
+    jarvis.py's _on_brain_creation for the interactive voice/chat path, and
+    employees.py's _run_job for the designer employee's background jobs.
 
     Deliberately NOT called from inside build_creation() itself: build_
     creation() is also invoked from within the short-lived, separate `claude
@@ -1976,14 +3040,14 @@ def notify_creation_ready(payload: dict):
 
 
 def record_creation(title, kind, slug, url):
-    """Not an MCP tool -- called directly by notify_creation_ready right
-    after every build_creation() finishes successfully, so every creation
-    the user has ever been shown stays retrievable afterward (via
+    """Not an MCP tool -- called directly by jarvis.py's _on_brain_creation
+    right after every build_creation() finishes, success or not, so every
+    creation the user has ever been shown stays retrievable afterward (via
     list_creations below) even after this session's in-memory creation
-    panel is gone. `url` is whatever creation_url() returned (and passed
-    _verify_creation_url) at the time -- None is stored as-is (rather than
-    skipped) so list_creations can say plainly that a given creation
-    currently has no phone link, instead of silently omitting it."""
+    panel is gone. `url` is whatever creation_url() returned at the time --
+    None is stored as-is (rather than skipped) so list_creations can say
+    plainly that a given creation currently has no phone link, instead of
+    silently omitting it."""
     log = _load_json(CREATIONS_LOG_PATH, [])
     log.append({
         "title": title, "kind": kind, "slug": slug, "url": url,
@@ -2045,9 +3109,15 @@ _IMPROVE_CONSTRAINTS = (
     "filesystem scope beyond a clearly-reasonable named folder; never make "
     "delete_item bypass the Recycle Bin; never let close_app target anything "
     "outside the curated _APP_ALIASES/_APP_IMAGE_NAMES list; never make "
-    "draft_email send automatically; never weaken CreationPanel.tsx's iframe "
-    "sandboxing or build_creation's network/localStorage restrictions; never "
-    "touch files outside this project folder. Before committing: run a Python "
+    "draft_email send automatically, on any provider; never add gmail.send, "
+    "Mail.Send, or any other real-send OAuth scope to gmail_service.py/ "
+    "outlook_service.py -- drafts only, always; never weaken CreationPanel.tsx's "
+    "iframe sandboxing or build_creation's network/localStorage restrictions; never "
+    "give _consult_admin_on_new_devices (jarvis.py) or any future security-response "
+    "logic a real effectful action (e.g. actually blocking/quarantining a device) -- "
+    "it may only ever result in a read-only research job through JarvisAdmin's "
+    "approval gate; that's a separate, bigger, router-specific ask if ever wanted; "
+    "never touch files outside this project folder. Before committing: run a Python "
     "syntax check on every changed .py file, and `npm run build` if any "
     "frontend file changed; if either fails, fix it or revert rather than "
     "leaving the repo broken. Commit with git and a clear message describing "
@@ -2317,6 +3387,54 @@ def agent_status() -> str:
     return "Agent status sir:\n" + "\n".join(lines)
 
 
+def _daily_briefing_content() -> str:
+    """Not an MCP tool -- called by jarvis.py's _daily_briefing_thread.
+    Gathers a plain-text snapshot across every domain Jarvis tracks (PC
+    health, security, finances, the employee team, long-term memory) for
+    telegram_common.ask_grounded to synthesize into one cohesive morning
+    message, instead of the four separate watchdog messages the user
+    would otherwise get piecemeal across the morning. Read-only, no side
+    effects -- never triggers a fresh check itself, just reports whatever
+    the existing watchers/ledger/memory already have on file."""
+    parts = []
+
+    if LAST_HEALTH_RESULT:
+        h = LAST_HEALTH_RESULT
+        parts.append(f"PC health: thermal {h.get('thermal_state', 'unknown')}, "
+                      f"{h.get('free_gb', '?')} GB free, critical={h.get('critical', False)}.")
+
+    if LAST_SECURITY_RESULT:
+        s = LAST_SECURITY_RESULT
+        parts.append(f"Security: {s.get('open_ports', '?')} open ports, "
+                      f"{len(s.get('suspicious', []))} suspicious processes, "
+                      f"{s.get('new_devices', 0)} new LAN devices, critical={s.get('critical', False)}.")
+
+    if STATEMENTS_AVAILABLE and statements_service.has_data():
+        summary = statements_service.get_spending_summary(days=30)
+        if summary:
+            chg = summary.get("change_pct")
+            chg_txt = f", {chg:+.0f}% vs last month" if chg is not None else ""
+            parts.append(f"Finance: ${summary['total_spent']:.0f} spent in the last 30 days{chg_txt}.")
+        anomalies = statements_service.recent_anomalies(3)
+        if anomalies:
+            parts.append("Recent spending flags: " + "; ".join(a["detail"] for a in anomalies))
+
+    recent_jobs = [
+        j for j in employees.list_jobs(limit=10)
+        if j.get("status") in ("done", "failed") and j.get("finished_at")
+        and (time.time() - j["finished_at"]) < 86400
+    ]
+    if recent_jobs:
+        parts.append("Team activity in the last day: "
+                      + "; ".join(f"{j['name']} ({j['role']}) {j['status']}" for j in recent_jobs))
+
+    mem_hits = memory_store.recent(5)
+    if mem_hits:
+        parts.append("Recently remembered: " + "; ".join(m["text"] for m in mem_hits))
+
+    return "\n".join(parts) if parts else "Nothing notable to report -- quiet across the board."
+
+
 def send_agent_test_message(agent: str) -> str:
     """Force a one-off manual test Telegram message from either background
     sub-agent right now, instead of waiting for its next scheduled send --
@@ -2349,21 +3467,47 @@ def security_status_report() -> str:
     brain as a voice/text-command tool -- agent_status() already covers that
     combined, cross-agent view; this one is specific to JarSecurity's own
     two-way channel."""
-    entries = _read_jsonl_tail(SECURITY_LOG_PATH, max_lines=5)
-    if not entries:
+    entries = _read_jsonl_tail(SECURITY_LOG_PATH, max_lines=20)
+    sweeps = [e for e in entries if not e.get("deep_scan")]
+    deep_scans = [e for e in entries if e.get("deep_scan")]
+    if not sweeps:
         lines = ["No sweeps logged yet sir -- the first one runs shortly after startup."]
     else:
-        lines = [f"Last {len(entries)} sweep{'s' if len(entries) != 1 else ''}:"]
-        for e in reversed(entries):
+        recent = sweeps[-5:]
+        lines = [f"Last {len(recent)} sweep{'s' if len(recent) != 1 else ''}:"]
+        for e in reversed(recent):
             state = "CRITICAL" if e.get("critical") else "clear"
             lines.append(
-                f"- {_fmt_ago(e['ts'])}: {state} -- {e.get('open_ports', 0)} open ports, "
+                f"- {_fmt_ago(e['ts'])}: {state} -- {e.get('open_ports', 0)} open ports "
+                f"({e.get('exposed_ports', 0)} exposed), "
                 f"{len(e.get('suspicious', []))} suspicious process(es), "
                 f"{e.get('new_devices', 0)} new device(s), "
                 f"firmware flagged={e.get('firmware_flagged', False)}, "
                 f"uBlock={'ok' if e.get('ublock_ok') else 'issue'}, "
                 f"DuckDuckGo={'ok' if e.get('ddg_ok') else 'issue'}"
             )
+        # Real per-port detail from the MOST RECENT sweep only -- this is
+        # what actually answers "what ports are open"/"which are exposed"
+        # instead of just a count, grounding ask_grounded() in real data.
+        newest_ports = sweeps[-1].get("ports")
+        if newest_ports:
+            lines.append(_format_port_detail(newest_ports))
+
+    if deep_scans:
+        d = deep_scans[-1]
+        lines.append(
+            f"Last deep scan ({_fmt_ago(d['ts'])}): lynis hardening index "
+            f"{d.get('lynis_hardening_index', '–')}/100, {d.get('lynis_warnings', 0)} lynis warning(s), "
+            f"{d.get('rkhunter_warnings', 0)} rkhunter warning(s)"
+        )
+    else:
+        lines.append("No deep scan (lynis/rkhunter) logged yet -- runs once daily.")
+
+    installed = {name: bool(shutil.which(name)) for name in _HARDENING_INSTALLS}
+    missing = [name for name, present in installed.items() if not present]
+    if missing:
+        lines.append(f"Not installed: {', '.join(missing)} -- can propose installing via propose_hardening_install.")
+
     last = _last_delivery_for("JarSecurity")
     if last:
         preview = last.get("preview", "").replace("\n", " ")
@@ -2383,95 +3527,49 @@ def security_status_report() -> str:
 # Every one of those already runs inside its own tightly-scoped nested
 # Claude Code call (fixed --tools allowlist, no shell-exec surface beyond
 # what those functions already had) -- hire_employee adds no new subprocess
-# call of its own, only a name, a routing decision, and a roster log so the
-# user can ask "who's on my team" / "what has my team done" later.
-EMPLOYEE_ROSTER_PATH = os.path.join(JARVIS_DIR, "employee_roster.jsonl")
-
-_EMPLOYEE_ROLES = {
-    "developer": "code/self-improvement work on Jarvis itself",
-    "designer": "building a dashboard or webpage",
-    "researcher": "answering something that needs live web research",
-    "analyst": "financial insights and spending tips from synced statements",
-}
-_ROLE_TITLES = {"developer": "Dev", "designer": "Design", "researcher": "Research", "analyst": "Finance"}
-
-
-def _next_employee_name(role):
-    """Sequential per-role name (Dev-1, Dev-2, Design-1, ...), counted from
-    the roster log itself so names stay stable across restarts without a
-    separate counter file to keep in sync."""
-    title = _ROLE_TITLES.get(role, role.title())
-    count = sum(1 for e in _read_jsonl_tail(EMPLOYEE_ROSTER_PATH, max_lines=10000) if e.get("role") == role)
-    return f"{title}-{count + 1}"
-
-
-def _log_employee_job(name, role, job, ok, result_summary):
-    _ensure_jarvis_dir()
-    entry = {"ts": time.time(), "name": name, "role": role, "job": job,
-              "ok": ok, "summary": (result_summary or "")[:500]}
-    try:
-        with open(EMPLOYEE_ROSTER_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
-
-
+# call of its own, only a name, a queue slot, and a background thread
+# (employees.py's worker_loop, run from jarvis.py) to actually run in. See
+# employees.py for the queue/worker implementation -- this used to run
+# jobs inline and block whoever asked (up to 10 minutes for self_improve/
+# build_creation); now it enqueues and returns immediately.
 def hire_employee(role: str, job: str) -> str:
-    """Act as the manager: "hire" a named employee (bot) to run one specific
-    job, then report back what got done. role must be one of: developer
-    (code/self-improvement changes to Jarvis itself), designer (build a
-    dashboard or webpage), researcher (answer something needing live web
-    search), analyst (financial insights/spending tips from synced
-    statements). Use this whenever the user explicitly asks Jarvis to
-    "hire"/"get someone"/"put someone on"/"bring on" a job -- for a direct
-    request ("build me a dashboard", "improve X") just call that specific
-    tool instead. This is a friendly framing over Jarvis's existing narrow
-    tools; hiring never grants any new capability, only names and routes the
-    job and logs it so list_employees can report on past hires."""
-    role = (role or "").strip().lower()
-    job = (job or "").strip()
-    if role not in _EMPLOYEE_ROLES:
-        return (f"I don't have a '{role}' role sir -- I can hire a: "
-                 + ", ".join(f"{r} ({d})" for r, d in _EMPLOYEE_ROLES.items()))
-    if not job:
-        return "What should they work on sir?"
-
-    name = _next_employee_name(role)
-    intro = f"Putting {name} on it sir: {job}\n\n"
-
-    try:
-        if role == "developer":
-            data = json.loads(self_improve(job))
-            ok = bool(data.get("ok"))
-            result = data.get("message") or data.get("summary") or ""
-        elif role == "designer":
-            kind = "webpage" if re.search(r'\bwebsite\b|\bwebpage\b|\bsite\b', job.lower()) else "dashboard"
-            data = json.loads(build_creation(job, kind=kind))
-            ok = bool(data.get("ok"))
-            result = data.get("message") or (f"Built and saved it sir: {data.get('path', '')}" if ok else "")
-        elif role == "researcher":
-            result = ask_claude_web(job)
-            ok = not result.startswith("I couldn't") and not result.startswith("That took too long")
-        else:  # analyst
-            result = get_financial_insights()
-            ok = "I don't have enough spending data" not in result
-    except Exception as e:
-        ok, result = False, f"ran into an error: {e}"
-
-    _log_employee_job(name, role, job, ok, result)
-    return intro + (result or ("Done sir." if ok else "Couldn't get that done sir."))
+    """Act as the manager: "hire" a named employee to run one specific job
+    in the background, then report back once it's done -- ask "who's on my
+    team" / "what has X been working on" / "is X still working" later to
+    check progress, don't expect this call itself to wait for the result.
+    role must be one of: developer (code/self-improvement changes to Jarvis
+    itself), designer (build a dashboard or webpage), researcher (answer
+    something needing live web search), analyst (financial insights/
+    spending tips from synced statements). Use this whenever the user
+    explicitly asks Jarvis to "hire"/"get someone"/"put someone on"/"bring
+    on" a job -- for a direct request ("build me a dashboard", "improve X")
+    just call that specific tool instead. This is a friendly framing over
+    Jarvis's existing narrow tools; hiring never grants any new capability,
+    only names, queues, and backgrounds the job."""
+    record, error = employees.enqueue_job(role, job)
+    if error:
+        return error
+    return f"Putting {record['name']} on it sir: {job}"
 
 
 def list_employees() -> str:
-    """Report on the manager's team: everyone Jarvis has "hired" recently and
-    what they were put on, most recent first. Use this for "who's on my
-    team" / "what has my team been working on" / "employee status"
-    requests."""
-    entries = _read_jsonl_tail(EMPLOYEE_ROSTER_PATH, max_lines=10)
-    if not entries:
+    """Report on the manager's team: everyone Jarvis has "hired" recently,
+    what they're on, and whether it's queued, still running, or finished --
+    most recent first. Use this for "who's on my team" / "what has my team
+    been working on" / "employee status" / "is X still working" requests."""
+    jobs = employees.list_jobs(limit=10)
+    if not jobs:
         return "No one's been hired yet sir -- ask me to hire a developer, designer, researcher, or analyst for a job."
     lines = []
-    for e in reversed(entries):
-        status = "done" if e.get("ok") else "hit a snag"
-        lines.append(f"{e.get('name')} ({e.get('role')}) -- \"{e.get('job')}\" -- {status}, {_fmt_ago(e['ts'])}")
+    for j in reversed(jobs):
+        if j["status"] == "queued":
+            status = "queued, hasn't started yet"
+        elif j["status"] == "running":
+            status = "still working on it"
+        elif j["status"] == "done":
+            status = f"done, {_fmt_ago(j['finished_at'])}"
+        else:
+            status = f"hit a snag, {_fmt_ago(j['finished_at'])}"
+        auto_tag = " (self-hired)" if j.get("auto") else ""
+        lines.append(f"{j['name']} ({j['role']}){auto_tag} -- \"{j['job']}\" -- {status}")
     return "Your team sir:\n" + "\n".join(lines)

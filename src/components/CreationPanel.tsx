@@ -14,15 +14,16 @@ export interface Creation {
 
 interface CreationPanelProps {
   creation: Creation;
-  offset: number;
   onClose: (id: number) => void;
 }
 
-// Renders something Jarvis just built. The iframe is deliberately sandboxed
-// to allow-scripts ONLY -- no allow-same-origin, no allow-top-navigation, no
-// allow-popups -- so generated HTML/JS can run visually but can never reach
-// Electron/preload APIs, cookies, or navigate the real app.
-export function CreationPanel({ creation, offset, onClose }: CreationPanelProps) {
+// Renders something Jarvis just built, full-window (see HudPage.tsx --
+// same "one focused thing at a time" treatment, not a floating card). The
+// iframe is deliberately sandboxed to allow-scripts ONLY -- no
+// allow-same-origin, no allow-top-navigation, no allow-popups -- so
+// generated HTML/JS can run visually but can never reach Electron/preload
+// APIs, cookies, or navigate the real app.
+export function CreationPanel({ creation, onClose }: CreationPanelProps) {
   const [copied, setCopied] = useState(false);
 
   const openInBrowser = () => {
@@ -46,21 +47,26 @@ export function CreationPanel({ creation, offset, onClose }: CreationPanelProps)
   };
 
   return (
-    <div
-      className="creation-panel"
-      style={{ transform: `translate(calc(-50% + ${offset * 22}px), ${offset * 22}px)` }}
-    >
+    <div className="creation-panel">
       <div className="creation-panel__bar">
         <span className="creation-panel__title">
           {creation.kind === "webpage" ? "WEBSITE" : "CREATION"} · {creation.title}
         </span>
         <div className="creation-panel__actions">
-          {creation.url && (
+          {creation.url ? (
             <button
               onClick={copyPhoneLink}
               title={`Copy phone/tailnet link: ${creation.url}`}
             >
               {copied ? "✓" : "📱"}
+            </button>
+          ) : (
+            <button
+              className="creation-panel__no-link"
+              disabled
+              title="No phone/tailnet link available for this creation (phone dashboard isn't reachable)"
+            >
+              📵
             </button>
           )}
           <button onClick={openInBrowser} title="Open in browser">⤢</button>

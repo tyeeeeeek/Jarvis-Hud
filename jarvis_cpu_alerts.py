@@ -73,26 +73,30 @@ def send_test_message() -> bool:
                   "the JarvisCPU_Alerts Telegram pipeline is working.")
 
 
+def respond(text: str) -> str:
+    """Answer one message the same way this bot's Telegram two-way channel
+    does: runs a fresh check_system_health() and grounds a reply in it via
+    telegram_common.ask_grounded() -- an on-demand PC health/status update
+    without waiting for the next scheduled 2-hour check. Shared by
+    poll_thread() (Telegram) and the phone dashboard's chat, so both talk
+    to the exact same logic. tools is imported locally (not at module load
+    time) because tools.py imports this module itself; importing it up top
+    would be a circular import. check_system_health() is a fast, read-
+    only-except-for-routine-cleanup call (sensors + disk usage), so it's
+    safe to run inline rather than backgrounding it."""
+    import tools
+    try:
+        result = tools.check_system_health()
+    except Exception as e:
+        return f"Couldn't run a health check sir: {e}"
+    return telegram_common.ask_grounded(
+        _AGENT_NAME, "monitoring this PC's thermal and disk health", result, text)
+
+
 def poll_thread(pipeline_stop) -> None:
     """This bot's two-way half: long-polls its own token/chat (isolated from
-    every other bot's inbox) and, on any incoming text message, runs a fresh
-    check_system_health() and replies with a natural answer to whatever was
-    actually asked, grounded in that real result via
-    telegram_common.ask_grounded() -- an on-demand PC health/status update
-    without waiting for the next scheduled 2-hour check. tools is imported
-    locally (not at module load time) because tools.py imports this module
-    itself; importing it up top would be a circular import.
-    check_system_health() is a fast, read-only-except-for-routine-cleanup
-    call (sensors + disk usage), so it's run right here on the poll thread
-    rather than spun off in the background."""
+    every other bot's inbox) and replies to any incoming text via
+    respond()."""
     def on_message(text):
-        import tools
-        try:
-            result = tools.check_system_health()
-        except Exception as e:
-            _send(f"Couldn't run a health check sir: {e}")
-            return
-        reply = telegram_common.ask_grounded(
-            _AGENT_NAME, "monitoring this PC's thermal and disk health", result, text)
-        _send(reply)
+        _send(respond(text))
     telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)

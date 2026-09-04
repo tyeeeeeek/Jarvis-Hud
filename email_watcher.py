@@ -1,48 +1,54 @@
 # ================================================================
-#   J.A.R.V.I.S — Email watcher
+#   J.A.R.V.I.S — Email watcher (Gmail + Outlook)
 #
-#   Polls Gmail for new mail and flags anything that looks like a
-#   bill due, a job offer, a delivery/order update, or a
-#   task-finished notification -- then hands a short spoken summary
-#   back to jarvis.py to announce (voice + HUD + optionally SMS).
+#   Polls whichever of Gmail (gmail_service.py) / Outlook
+#   (outlook_service.py) is configured for new mail and flags anything
+#   that looks like a bill due, a job offer, a delivery/order update, or
+#   a task-finished notification -- then hands a short spoken/text
+#   summary back to jarvis.py to announce (voice + HUD + Telegram).
+#   Either, both, or neither provider can be configured; each is fully
+#   independent, so setting up one doesn't require the other.
 #
-#   Uses its OWN Gmail OAuth credentials, separate from any Gmail
-#   connection this chat session has -- Jarvis needs to keep
-#   watching mail even when no Claude Code session is open. See
-#   README's "Watch my email" setup section for how to get
-#   credentials.json from Google Cloud Console (one-time, free).
-#
-#   Classification runs on local Ollama, not Claude -- this polls
-#   frequently and cheaply, so it uses the free/local model for
-#   triage rather than spending on every single email.
+#   Classification prefers the real Claude CLI (same locked-down, no-
+#   tools chat-only call telegram_common.ask_grounded uses) so triage
+#   reads like a real judgment call instead of a rigid keyword match,
+#   and falls back to a local Ollama model if the CLI is unavailable --
+#   this polls every couple of minutes across two mailboxes, so a free/
+#   local fallback matters for cost, but quality shouldn't have to
+#   suffer when the better option is right there.
 # ================================================================
-import os
 import json
+import os
+import subprocess
+import shutil
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
+
+try:
+    import gmail_service
+    GMAIL_LIB_AVAILABLE = True
+except ImportError:
+    GMAIL_LIB_AVAILABLE = False
+
+try:
+    import outlook_service
+    OUTLOOK_LIB_AVAILABLE = True
+except ImportError:
+    OUTLOOK_LIB_AVAILABLE = False
 
 HOME = os.path.expanduser("~")
 JARVIS_DIR = os.path.join(HOME, ".jarvis")
 SEEN_PATH = os.path.join(JARVIS_DIR, "email_seen.json")
 
-CREDENTIALS_PATH = os.environ.get("GMAIL_CREDENTIALS_PATH", os.path.join(os.path.dirname(__file__), "credentials.json"))
-TOKEN_PATH = os.environ.get("GMAIL_TOKEN_PATH", os.path.join(os.path.dirname(__file__), "token.json"))
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2"
+_CLAUDE_CLI = shutil.which("claude")
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
-
-try:
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-    GMAIL_LIB_AVAILABLE = True
-except ImportError:
-    GMAIL_LIB_AVAILABLE = False
-
-EMAIL_WATCH_AVAILABLE = bool(GMAIL_LIB_AVAILABLE and os.path.exists(CREDENTIALS_PATH))
+GMAIL_WATCH_AVAILABLE = bool(GMAIL_LIB_AVAILABLE and gmail_service.GMAIL_AVAILABLE)
+OUTLOOK_WATCH_AVAILABLE = bool(OUTLOOK_LIB_AVAILABLE and outlook_service.OUTLOOK_AVAILABLE)
+EMAIL_WATCH_AVAILABLE = GMAIL_WATCH_AVAILABLE or OUTLOOK_WATCH_AVAILABLE
 
 
 def _ensure_dir():
@@ -59,112 +65,117 @@ def _load_seen():
 
 def _save_seen(seen):
     _ensure_dir()
-    # Cap it so this file doesn't grow forever.
-    trimmed = list(seen)[-2000:]
+    trimmed = list(seen)[-4000:]  # doubled vs. single-provider days, since ids from two mailboxes share this file
     tmp = SEEN_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(trimmed, f)
     os.replace(tmp, SEEN_PATH)
 
 
-def _get_service():
-    creds = None
-    if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            # First-run only: opens a browser for the standard Google OAuth
-            # consent screen, then caches token.json so this never happens
-            # again.
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-            creds = flow.run_local_server(port=0)
-        _ensure_dir()
-        with open(TOKEN_PATH, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-    return build("gmail", "v1", credentials=creds)
-
-
-_CLASSIFY_PROMPT = (
-    "You triage email for a personal assistant. Given the subject and a short "
-    "snippet, decide if this is personally important: a bill or payment due, "
-    "a job offer or interview request, an order/package delivery update, or a "
-    "notification that some task/build/job finished. Ignore newsletters, "
-    "marketing, social notifications, and anything not in those categories.\n\n"
-    "Reply with EXACTLY one line: either the word NONE, or "
-    "CATEGORY | a one-sentence spoken-style summary (no markdown).\n"
-    "CATEGORY must be one of: bill, job, delivery, task, other.\n\n"
-    "Subject: {subject}\nSnippet: {snippet}\n"
+_CLASSIFY_SYSTEM = (
+    "You triage email for a personal assistant. Given a subject and a short snippet, decide "
+    "if this is personally important: a bill or payment due, a job offer or interview request, "
+    "an order/package delivery update, or a notification that some task/build/job finished. "
+    "Ignore newsletters, marketing, social notifications, and anything not in those categories. "
+    "Reply with EXACTLY one line: either the word NONE, or CATEGORY | a one-sentence spoken-style "
+    "summary (no markdown). CATEGORY must be one of: bill, job, delivery, task, other."
 )
 
 
-def _classify(subject, snippet):
+def _classify_claude(subject, snippet):
+    if not _CLAUDE_CLI:
+        return None
+    prompt = f"Subject: {subject[:200]}\nSnippet: {snippet[:400]}\n"
+    try:
+        r = subprocess.run(
+            [_CLAUDE_CLI, "-p", prompt, "--tools", "", "--system-prompt", _CLASSIFY_SYSTEM],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return None
+        return (r.stdout or "").strip()
+    except Exception as e:
+        print(f"  [EmailWatch] Claude CLI classify error: {e}")
+        return None
+
+
+def _classify_ollama(subject, snippet):
     try:
         r = requests.post(OLLAMA_URL, json={
             "model": OLLAMA_MODEL,
-            "prompt": _CLASSIFY_PROMPT.format(subject=subject[:200], snippet=snippet[:400]),
+            "prompt": f"{_CLASSIFY_SYSTEM}\n\nSubject: {subject[:200]}\nSnippet: {snippet[:400]}\n",
             "stream": False,
         }, timeout=20)
         if r.status_code != 200:
             return None
-        text = r.json().get("response", "").strip()
-        if not text or text.upper().startswith("NONE"):
-            return None
-        if "|" not in text:
-            return None
-        category, summary = text.split("|", 1)
-        return category.strip().lower(), summary.strip()
+        return r.json().get("response", "").strip()
     except Exception as e:
-        print(f"  [EmailWatch] Classify error: {e}")
+        print(f"  [EmailWatch] Ollama classify error: {e}")
         return None
 
 
+def _classify(subject, snippet):
+    """Returns (category, summary) or None. Tries the real Claude CLI
+    first, falls back to local Ollama, matching telegram_common.
+    ask_grounded's upgrade path -- see module docstring."""
+    text = _classify_claude(subject, snippet) or _classify_ollama(subject, snippet)
+    if not text or text.upper().startswith("NONE"):
+        return None
+    if "|" not in text:
+        return None
+    category, summary = text.split("|", 1)
+    return category.strip().lower(), summary.strip()
+
+
+def _poll_gmail(seen, on_important):
+    try:
+        for m in gmail_service.list_recent_messages("newer_than:2d", 15):
+            key = f"gmail:{m['id']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            result = _classify(m["subject"], m["snippet"])
+            if result:
+                category, summary = result
+                on_important("Gmail", category, summary)
+    except Exception as e:
+        print(f"  [EmailWatch] Gmail poll error: {e}")
+
+
+def _poll_outlook(seen, on_important):
+    try:
+        since_iso = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for m in outlook_service.list_recent_messages(since_iso, 15):
+            key = f"outlook:{m['id']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            result = _classify(m["subject"], m["snippet"])
+            if result:
+                category, summary = result
+                on_important("Outlook", category, summary)
+    except Exception as e:
+        print(f"  [EmailWatch] Outlook poll error: {e}")
+
+
 def poll_thread(on_important, pipeline_stop, poll_secs=120):
-    """Background loop: checks Gmail for new mail and calls
-    on_important(category, summary) for anything that looks important."""
+    """Background loop: checks whichever of Gmail/Outlook is configured
+    for new mail and calls on_important(provider, category, summary) for
+    anything that looks important. A provider that isn't set up (no
+    credentials.json / no OUTLOOK_CLIENT_ID+device-code login yet) is
+    silently skipped, not treated as an error -- see README."""
     if not EMAIL_WATCH_AVAILABLE:
-        print("  [EmailWatch] Not configured -- email watching is disabled. See README.")
+        print("  [EmailWatch] Neither Gmail nor Outlook is configured -- email watching is disabled. See README.")
         return
 
-    try:
-        service = _get_service()
-    except Exception as e:
-        print(f"  [EmailWatch] Auth error: {e}")
-        return
+    which = ", ".join(p for p, ok in (("Gmail", GMAIL_WATCH_AVAILABLE), ("Outlook", OUTLOOK_WATCH_AVAILABLE)) if ok)
+    print(f"  [EmailWatch] Watching for important mail ({which}).")
 
     seen = _load_seen()
-    print("  [EmailWatch] Watching for important mail.")
-
     while not pipeline_stop.is_set():
-        try:
-            resp = service.users().messages().list(
-                userId="me", q="newer_than:2d", maxResults=15,
-            ).execute()
-            for m in resp.get("messages", []):
-                mid = m["id"]
-                if mid in seen:
-                    continue
-                seen.add(mid)
-
-                msg = service.users().messages().get(
-                    userId="me", id=mid, format="metadata",
-                    metadataHeaders=["Subject", "From"],
-                ).execute()
-                headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-                subject = headers.get("Subject", "(no subject)")
-                snippet = msg.get("snippet", "")
-
-                result = _classify(subject, snippet)
-                if result:
-                    category, summary = result
-                    try:
-                        on_important(category, summary)
-                    except Exception as e:
-                        print(f"  [EmailWatch] Notify error: {e}")
-
-            _save_seen(seen)
-        except Exception as e:
-            print(f"  [EmailWatch] Poll error: {e}")
-
+        if GMAIL_WATCH_AVAILABLE:
+            _poll_gmail(seen, on_important)
+        if OUTLOOK_WATCH_AVAILABLE:
+            _poll_outlook(seen, on_important)
+        _save_seen(seen)
         time.sleep(poll_secs)

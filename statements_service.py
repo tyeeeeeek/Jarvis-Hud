@@ -50,6 +50,21 @@ _PDF_LINE_DATE_RE = re.compile(r"^(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}
 _MONEY_RE = re.compile(r"\(?-?\$?\d[\d,]*\.\d{2}\)?-?")
 _YEAR_RE = re.compile(r"\b(20\d{2})\b")
 
+# Some banks (e.g. SoFi) print transaction dates as "Jul 31, 2026" rather
+# than a numeric format -- matched separately from _PDF_LINE_DATE_RE since
+# it needs its own month-name-to-number lookup.
+_MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+_MONTH_LOOKUP = {m: i + 1 for i, m in enumerate(_MONTH_NAMES)}
+_MONTH_DATE_RE = re.compile(r"^(" + "|".join(_MONTH_NAMES) + r")[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b", re.IGNORECASE)
+
+# Some exports (again, e.g. SoFi) split one transaction across three lines --
+# date+description, then a reference line like "Transaction ID: 2999-1",
+# then the actual "$amount $balance" line -- rather than keeping everything
+# on one line. This recognizes that middle reference line specifically, so
+# the amount lookahead below only ever skips past a line that's clearly
+# metadata, never blindly scanning ahead into unrelated statement text.
+_METADATA_LINE_RE = re.compile(r"^(Transaction ID|Ref(?:erence)?\.?\s*#?|Confirmation\s*#?|Trace\s*#?)\s*:?", re.IGNORECASE)
+
 
 def ensure_statements_dir():
     os.makedirs(STATEMENTS_DIR, exist_ok=True)
@@ -304,46 +319,83 @@ def _guess_statement_year(text):
     return m.group(1) if m else str(datetime.now().year)
 
 
-def _parse_pdf_line(line, default_year):
-    line = line.strip()
-    date_match = _PDF_LINE_DATE_RE.match(line)
-    if not date_match:
-        return None
-    date_obj = _parse_date(date_match.group(1), default_year)
-    if date_obj is None:
-        return None
-
-    rest = line[date_match.end():].strip()
-    money_matches = list(_MONEY_RE.finditer(rest))
-    if not money_matches:
-        return None
-
-    # First dollar figure after the description is the transaction amount;
-    # a second one (common on statements with a running balance column) is
-    # ignored rather than mistaken for the amount.
-    first = money_matches[0]
-    desc = rest[:first.start()].strip(" -\t")
-    if not desc:
-        return None
-    try:
-        amount = _parse_amount(first.group(0))
-    except ValueError:
-        return None
-
-    return {"date": date_obj.strftime("%Y-%m-%d"), "description": desc, "amount": amount, "category": "Uncategorized"}
+def _match_leading_date(line, default_year):
+    """Try both supported "start of line" date styles -- numeric
+    (_PDF_LINE_DATE_RE, e.g. "07/29/2026" or a bare "07/29") and month-name
+    (_MONTH_DATE_RE, e.g. "Jul 29, 2026"). Returns (date_obj,
+    rest_of_line_after_the_date) or (None, None)."""
+    m = _PDF_LINE_DATE_RE.match(line)
+    if m:
+        date_obj = _parse_date(m.group(1), default_year)
+        if date_obj is not None:
+            return date_obj, line[m.end():].strip()
+    m = _MONTH_DATE_RE.match(line)
+    if m:
+        try:
+            date_obj = datetime(int(m.group(3)), _MONTH_LOOKUP[m.group(1)[:3].lower()], int(m.group(2)))
+        except ValueError:
+            return None, None
+        return date_obj, line[m.end():].strip()
+    return None, None
 
 
 def _parse_statement_text(text, source_name):
-    """Line-by-line "date + $ amount" recovery shared by PDF text layers,
-    plain-text (.txt) statements, and OCR'd image text -- all three end up
-    as loose lines of text with no header row to key off of."""
+    """"Date + $ amount" recovery shared by PDF text layers, plain-text
+    (.txt) statements, and OCR'd image text -- all three end up as loose
+    lines with no header row to key off of. Handles two record shapes:
+    same-line (date, description, and amount all on one line -- most CSV-
+    style exports) and multi-line (a date+description line, optionally
+    followed by a reference line like "Transaction ID: ...", with the
+    amount appearing on the next line instead -- confirmed live against a
+    real SoFi PDF statement, where a same-line-only parser found zero
+    transactions in genuine statements). Only ever looks 1-2 lines past a
+    date line (and only past a second one when the first is recognizably a
+    reference/metadata line, never a blind scan), so unrelated date-like
+    text elsewhere in a statement (an "as of <date>" balance blurb, a
+    statement-period header) can't be mistaken for a transaction just
+    because a dollar figure happens to appear a few lines later."""
     rows = []
     default_year = _guess_statement_year(text)
-    for line in text.splitlines():
-        tx = _parse_pdf_line(line, default_year)
-        if tx:
-            tx["source_file"] = source_name
-            rows.append(tx)
+    lines = [l.strip() for l in text.splitlines()]
+    i = 0
+    while i < len(lines):
+        date_obj, rest = _match_leading_date(lines[i], default_year)
+        if date_obj is None:
+            i += 1
+            continue
+
+        amount = None
+        desc = rest
+        same_line_money = list(_MONEY_RE.finditer(rest))
+        if same_line_money:
+            # First dollar figure after the description is the transaction
+            # amount; a second one (a running-balance column) is ignored.
+            first = same_line_money[0]
+            desc = rest[:first.start()].strip(" -\t")
+            try:
+                amount = _parse_amount(first.group(0))
+            except ValueError:
+                amount = None
+        else:
+            j = i + 1
+            if j < len(lines) and _METADATA_LINE_RE.match(lines[j]):
+                j += 1
+            if j < len(lines):
+                lookahead_money = list(_MONEY_RE.finditer(lines[j]))
+                if lookahead_money:
+                    try:
+                        amount = _parse_amount(lookahead_money[0].group(0))
+                    except ValueError:
+                        amount = None
+
+        i += 1
+        desc = desc.strip(" -\t")
+        if amount is None or not desc:
+            continue
+        rows.append({
+            "date": date_obj.strftime("%Y-%m-%d"), "description": desc,
+            "amount": amount, "category": "Uncategorized", "source_file": source_name,
+        })
     return _fix_sign_convention(rows)
 
 
@@ -578,6 +630,7 @@ def get_spending_summary(days=30):
     cutoff = today - timedelta(days=days)
     prev_cutoff = cutoff - timedelta(days=days)
     by_category, by_merchant, by_month = {}, {}, {}
+    prev_by_category = {}
     total_spent = 0.0
     previous_spent = 0.0
 
@@ -594,6 +647,8 @@ def get_spending_summary(days=30):
         if tx_date < cutoff:
             if tx_date >= prev_cutoff:
                 previous_spent += amount
+                category = tx["category"] or "Uncategorized"
+                prev_by_category[category] = prev_by_category.get(category, 0.0) + amount
             continue
 
         category = tx["category"] or "Uncategorized"
@@ -615,6 +670,7 @@ def get_spending_summary(days=30):
         "previous_period_spent": round(previous_spent, 2),
         "change_pct": change_pct,
         "by_category": [{"name": n, "amount": round(a, 2)} for n, a in top_categories],
+        "previous_by_category": {n: round(a, 2) for n, a in prev_by_category.items()},
         "top_merchants": [{"name": n, "amount": round(a, 2)} for n, a in top_merchants],
         "monthly_trend": [{"month": m, "amount": round(a, 2)} for m, a in trend],
     }
@@ -641,3 +697,141 @@ def get_recurring_charges(min_occurrences=2, top_n=5):
     ]
     recurring.sort(key=lambda r: -(r["amount"] * r["count"]))
     return recurring[:top_n]
+
+
+# ---- Proactive anomaly detection ------------------------------------------
+# Backs jarvis.py's _finance_watcher_thread -- the "notice something wrong
+# without being asked" counterpart to get_spending_summary/get_financial_
+# insights, which only ever answer when asked. Dedup follows email_watcher.
+# py's exact pattern (a JSON set of fingerprints already alerted on) so a
+# spike that's still true on the next daily check doesn't re-fire every day.
+ANOMALIES_SEEN_PATH = os.path.join(os.path.expanduser("~"), ".jarvis", "finance_anomalies_seen.json")
+# Append-only history of every anomaly ever flagged, separate from the seen
+# SET above -- ANOMALIES_SEEN_PATH exists purely to suppress re-alerting on
+# the same thing, so it can never double as a display log (reading it would
+# have no way to show "what was found," only "what's already been silenced").
+# Read-only consumers (the phone dashboard's Finance tab) use
+# recent_anomalies() against this file instead of ever calling
+# check_spending_anomalies() themselves, which would incorrectly consume
+# the "new" designation a real watcher check needs to actually alert on.
+ANOMALIES_LOG_PATH = os.path.join(os.path.expanduser("~"), ".jarvis", "finance_anomalies_log.jsonl")
+
+_SPIKE_THRESHOLD_PCT = 40.0
+_CATEGORY_THRESHOLD_PCT = 50.0
+_CATEGORY_MIN_AMOUNT = 30.0  # floor so a $5 category doubling to $10 doesn't count as a "spike"
+
+
+def _load_anomalies_seen():
+    try:
+        with open(ANOMALIES_SEEN_PATH, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_anomalies_seen(seen):
+    os.makedirs(os.path.dirname(ANOMALIES_SEEN_PATH), exist_ok=True)
+    trimmed = list(seen)[-2000:]
+    tmp = ANOMALIES_SEEN_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(trimmed, f)
+    os.replace(tmp, ANOMALIES_SEEN_PATH)
+
+
+def _log_anomaly(anomaly):
+    os.makedirs(os.path.dirname(ANOMALIES_LOG_PATH), exist_ok=True)
+    with open(ANOMALIES_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": datetime.now().timestamp(), **anomaly}) + "\n")
+
+
+def recent_anomalies(limit: int = 10) -> list:
+    """Read-only history of anomalies actually flagged (most recent last),
+    for display (the phone dashboard's Finance tab) -- never call
+    check_spending_anomalies() itself for this purpose, since that mutates
+    ANOMALIES_SEEN_PATH and would silently swallow the real watcher's next
+    genuine alert."""
+    try:
+        with open(ANOMALIES_LOG_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def check_spending_anomalies() -> list:
+    """Compares the current 30-day window against the prior one and against
+    known recurring charges, and returns anything crossing a threshold that
+    hasn't already been flagged: [{"kind": "spike"|"category"|
+    "new_recurring", "detail": "..."}, ...]. Empty list if nothing's
+    notable, or if there isn't enough data yet. Each distinct anomaly is
+    only ever returned once (see ANOMALIES_SEEN_PATH) -- a spike that's
+    still true tomorrow won't re-fire every single day."""
+    if not has_data():
+        return []
+    summary = get_spending_summary(days=30)
+    if not summary:
+        return []
+
+    seen = _load_anomalies_seen()
+    found = []
+    month_key = datetime.now().strftime("%Y-%m")
+
+    # 1. Overall spend spike vs. the prior 30-day window.
+    change_pct = summary.get("change_pct")
+    if change_pct is not None and change_pct >= _SPIKE_THRESHOLD_PCT:
+        fp = f"spike|{month_key}"
+        if fp not in seen:
+            anomaly = {
+                "kind": "spike",
+                "detail": (f"Total spending is up {change_pct:.0f}% versus last month -- "
+                           f"${summary['total_spent']:.0f} vs ${summary['previous_period_spent']:.0f}."),
+            }
+            found.append(anomaly)
+            _log_anomaly(anomaly)
+            seen.add(fp)
+
+    # 2. Any single category spiking hard versus its own prior-period share.
+    prev_by_category = summary.get("previous_by_category", {})
+    for cat in summary.get("by_category", []):
+        name, amount = cat["name"], cat["amount"]
+        if amount < _CATEGORY_MIN_AMOUNT:
+            continue
+        prev_amount = prev_by_category.get(name, 0.0)
+        cat_change = (
+            None if prev_amount <= 0 else round((amount - prev_amount) / prev_amount * 100, 1)
+        )
+        if cat_change is not None and cat_change >= _CATEGORY_THRESHOLD_PCT:
+            fp = f"category|{month_key}|{name}"
+            if fp not in seen:
+                anomaly = {
+                    "kind": "category",
+                    "detail": (f"{name} spending is up {cat_change:.0f}% this month -- "
+                               f"${amount:.0f} vs ${prev_amount:.0f} last month."),
+                }
+                found.append(anomaly)
+                _log_anomaly(anomaly)
+                seen.add(fp)
+
+    # 3. A recurring charge that's new since the last check (permanent
+    # fingerprint, not month-scoped -- once flagged, never again unless the
+    # amount itself changes).
+    for r in get_recurring_charges():
+        fp = f"new_recurring|{r['name']}|{r['amount']:.2f}"
+        if fp not in seen:
+            anomaly = {
+                "kind": "new_recurring",
+                "detail": f"Looks like a new recurring charge: {r['name']} at ${r['amount']:.2f}, seen {r['count']} times.",
+            }
+            found.append(anomaly)
+            _log_anomaly(anomaly)
+            seen.add(fp)
+
+    if found:
+        _save_anomalies_seen(seen)
+    return found

@@ -25,7 +25,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = io.StringIO()
 
-import os, re, json, time, queue, random, asyncio, webbrowser, socket
+import os, re, json, time, queue, random, asyncio, webbrowser, socket, signal
 import tempfile, threading, zipfile, urllib.request, shutil, subprocess
 from datetime import datetime, timedelta
 
@@ -65,10 +65,17 @@ import tools
 import brain
 import sms
 import telegram_bridge
+import jarvis_admin
 import jarvis_cpu_alerts
 import jarvis_improvement
 import jarvis_security
+import jarvis_email_bot
+import jarvis_outlook_bot
+import bot_events
+import employees
+import agent_registry
 import dashboard_server
+import telegram_common
 import email_watcher
 
 try:
@@ -345,6 +352,47 @@ async def _ws_broadcast_async(msg):
     _ws_clients.difference_update(dead)
 
 
+def _on_camera_frame(image_b64):
+    """Registered with dashboard_server.register_frame_handler at startup
+    -- see that module's comment for why this is a direct call rather than
+    a bot_events publish. `image_b64` is None when the phone's camera just
+    closed (clears the desktop's feed instead of leaving a frozen frame)."""
+    _ws_broadcast({"type": "camera_frame", "image": image_b64})
+
+
+def _on_hand_gesture(x, y, pinching, active):
+    """Registered with dashboard_server.register_gesture_handler at
+    startup -- same direct-call reasoning as _on_camera_frame above."""
+    _ws_broadcast({"type": "hand_gesture", "x": x, "y": y, "pinching": pinching, "active": active})
+
+
+def _on_bot_event(event):
+    """Bridges bot_events (the shared bus dashboard_server.py, the
+    watchdogs, and employees publish to) into the desktop HUD's own
+    WebSocket feed -- the phone HUD's camera Q&A (`vision_qa`) and the
+    voice-triggered map tools (`show_map`/`show_weather_radar` in
+    tools.py), so a voice command actually updates the desktop UI instead
+    of only being spoken back. One Jarvis, not separate surfaces that
+    don't know what each other did. Never raises -- bot_events.publish
+    already isolates subscriber exceptions, but this stays defensive
+    since it runs on that shared dispatch path."""
+    etype = event.get("type")
+    payload = event.get("payload") or {}
+
+    if etype == "vision_qa":
+        question, answer = payload.get("question", ""), payload.get("answer", "")
+        if not answer:
+            return
+        _ws_broadcast({"type": "vision_qa", "question": question, "answer": answer})
+        _ws_broadcast({"type": "activity", "text": f'Phone camera asked "{question}" -> {answer}'})
+
+    elif etype == "show_map":
+        _ws_broadcast({"type": "show_map", **payload})
+
+    elif etype == "show_weather_radar":
+        _ws_broadcast({"type": "show_weather_radar", **payload})
+
+
 async def _ws_handler(websocket):
     global _startup_spoken
     _ws_clients.add(websocket)
@@ -401,14 +449,31 @@ def _already_running():
     open. The Electron app still tries to spawn jarvis.py itself as a
     dev-mode convenience -- this makes that harmless instead of a port
     conflict or, worse, a second instance double-polling Telegram/SMS and
-    replying to every text twice."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("localhost", WS_PORT))
-        s.close()
-        return False
-    except OSError:
-        return True
+    replying to every text twice.
+
+    Sets SO_REUSEADDR before binding, matching what asyncio's own server
+    (which start_ws_server actually uses, via websockets.serve) already
+    does by default on POSIX -- without it, this check is *stricter* than
+    the real server: it can report "already running" (EADDRINUSE from a
+    just-closed socket still in TIME_WAIT) in a case where the real
+    websockets.serve() call would have bound just fine. Confirmed live:
+    even with SO_REUSEADDR, a `systemctl restart` can still start the new
+    process in the same instant the kernel is still tearing down the old
+    one's socket, so this also retries a few times before concluding
+    "already running" -- without both fixes, this exited immediately after
+    a normal restart, leaving nothing running at all."""
+    for attempt in range(5):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("localhost", WS_PORT))
+            return False
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.5)
+        finally:
+            s.close()
+    return True
 
 
 def start_ws_server():
@@ -703,12 +768,11 @@ def _on_brain_creation(payload):
         return
     kind = payload.get("kind", "dashboard")
     title = payload.get("title", "") or "Your creation"
-    # Works out the phone/tailnet link (verifying it's actually reachable
-    # first), persists this creation to the retrievable log, and sends the
-    # Telegram notice (with or without a link) -- see tools.
-    # notify_creation_ready's docstring for why this has to happen here
-    # (jarvis.py's own long-lived process) rather than inside build_
-    # creation() itself.
+    # Works out the phone/tailnet link, persists this creation to the
+    # retrievable log, and sends the Telegram notice (with or without a
+    # link) -- see tools.notify_creation_ready's docstring for why this has
+    # to happen here (jarvis.py's own process) rather than inside
+    # build_creation() itself.
     lan_url = tools.notify_creation_ready(payload)
     _ws_broadcast({
         "type": "creation_ready",
@@ -720,7 +784,7 @@ def _on_brain_creation(payload):
     if lan_url:
         print(f"  [Creation] Also reachable on your phone/tailnet -> {lan_url}")
     else:
-        print("  [Creation] No phone/tailnet link available (dashboard server isn't running or didn't respond).")
+        print("  [Creation] No phone/tailnet link available (dashboard server isn't running).")
     # Both kinds pop straight into Brave, front-and-center, the moment
     # they're ready -- like a Claude artifact appearing -- in addition to
     # the in-HUD panel above; a dashboard still ALSO shows in the HUD panel
@@ -801,9 +865,39 @@ def _health_watcher_thread():
                 speak(text)
             _notify_all(text)
             jarvis_cpu_alerts.send_critical_alert(result)
+            bot_events.publish("health_critical", {"result": result})
         if result:
             jarvis_cpu_alerts.send_summary(result)
         if pipeline_stop.wait(_HEALTH_CHECK_INTERVAL_SECONDS):
+            break
+
+
+_FINANCE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+def _finance_watcher_thread():
+    """Runs tools._finance_watcher_check() immediately, then once a day for
+    as long as Jarvis's backend is running -- bank data doesn't change fast
+    enough to justify the 2-hour cadence _health_watcher_thread uses. Only
+    speaks up for anomalies that haven't already been flagged (see
+    statements_service.check_spending_anomalies's dedup), so this stays
+    quiet on every day nothing's actually notable. No dedicated Telegram
+    bot for this -- reuses _notify_all like _reminder_watcher_thread and
+    _on_important_email already do, since a proactive finance channel
+    doesn't need its own isolated bot the way PC-health/security do."""
+    while not pipeline_stop.is_set():
+        try:
+            anomalies = tools._finance_watcher_check()
+        except Exception as e:
+            print(f"  [FinanceWatch] {e}")
+            anomalies = []
+        for a in anomalies:
+            text = f"Heads up on your spending sir: {a['detail']}"
+            with _command_lock:
+                speak(text)
+            _notify_all(text)
+            bot_events.publish("finance_anomaly", a)
+        if pipeline_stop.wait(_FINANCE_CHECK_INTERVAL_SECONDS):
             break
 
 
@@ -838,6 +932,45 @@ def _improvement_watcher_thread():
             jarvis_improvement.send_report(result.get("added", []), result.get("timed_out", False))
 
 
+_BRIEFING_HOUR = 7
+_BRIEFING_MINUTE = 0
+
+
+def _daily_briefing_thread():
+    """Once every 24 hours, starting at 7 AM local time (same fixed-hour
+    scheduling pattern as _improvement_watcher_thread above) -- synthesizes
+    ONE cohesive morning briefing across everything Jarvis tracks (PC
+    health, security, finances, the hired employee team, and long-term
+    memory: tools._daily_briefing_content()) via the real Claude CLI
+    (telegram_common.ask_grounded, same "real Claude CLI, Ollama fallback"
+    path every other proactive alert in this project already uses), rather
+    than the four separate watchdog messages the user would otherwise get
+    piecemeal across the morning. Delivered the same way as every other
+    proactive alert: spoken + _notify_all, plus a bot_events publish so it
+    shows up in the phone dashboard's live feed too."""
+    while not pipeline_stop.is_set():
+        now = datetime.now()
+        target = now.replace(hour=_BRIEFING_HOUR, minute=_BRIEFING_MINUTE, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        if pipeline_stop.wait((target - now).total_seconds()):
+            break
+        try:
+            content = tools._daily_briefing_content()
+            briefing = telegram_common.ask_grounded(
+                "Jarvis",
+                "giving the user one cohesive daily briefing across PC health, security, "
+                "finances, their hired employee team, and anything remembered long-term",
+                content, "Give me my daily briefing.")
+        except Exception as e:
+            print(f"  [Briefing] {e}")
+            continue
+        with _command_lock:
+            speak(briefing)
+        _notify_all(f"[Daily Briefing]\n{briefing}")
+        bot_events.publish("daily_briefing", {"text": briefing})
+
+
 _NETWORK_SCAN_INTERVAL_SECONDS = 15 * 60  # 15 minutes
 
 
@@ -861,6 +994,7 @@ def _network_watch_thread():
 
 
 _SECURITY_CHECK_INTERVAL_SECONDS = 4 * 60 * 60  # 4 hours
+_DEEP_SECURITY_INTERVAL_SECONDS = 24 * 60 * 60  # 1 day -- lynis + rkhunter take minutes, not seconds
 
 
 def _security_watcher_thread():
@@ -889,10 +1023,73 @@ def _security_watcher_thread():
                 speak(text)
             _notify_all(text)
             jarvis_security.send_alert(result)
+            bot_events.publish("security_critical", {"result": result})
+            _consult_admin_on_new_devices()
         if result:
             jarvis_security.send_summary(result)
         if pipeline_stop.wait(_SECURITY_CHECK_INTERVAL_SECONDS):
             break
+
+
+def _deep_security_watcher_thread():
+    """Runs the slower, deeper security scans -- lynis's full hardening
+    audit and rkhunter's rootkit check -- once daily, immediately then
+    every _DEEP_SECURITY_INTERVAL_SECONDS. Too slow (1-4 minutes each) for
+    the cheap 4-hour run_security_check() sweep above, so they get their
+    own schedule. Logs via tools.log_deep_scan_result() (a distinct
+    "deep_scan" entry in the same security_log.jsonl run_security_check()
+    already writes to) and alerts through JarSecurity immediately on a
+    real finding -- a genuine lynis warning or any rkhunter warning, not
+    just "the scan completed" -- same alert path (and same
+    bot_events "security_critical" event feeding the phone dashboard's
+    Live Activity feed) run_security_check() already uses."""
+    while not pipeline_stop.is_set():
+        try:
+            audit_text = tools.run_security_audit()
+            print(f"  [DeepSecurity] lynis: {audit_text}")
+            rootkit_text = tools.run_rootkit_scan()
+            print(f"  [DeepSecurity] rkhunter: {rootkit_text}")
+            result = tools.log_deep_scan_result()
+            if result["critical"]:
+                jarvis_security.send_alert(result["summary"])
+                bot_events.publish("security_critical", {"result": result["summary"]})
+            else:
+                jarvis_security.send_summary(result["summary"])
+        except Exception as e:
+            print(f"  [DeepSecurity] {e}")
+        if pipeline_stop.wait(_DEEP_SECURITY_INTERVAL_SECONDS):
+            break
+
+
+def _consult_admin_on_new_devices():
+    """JarSecurity -> JarvisAdmin consult: a brand-new LAN device was just
+    flagged critical (see above). Rather than just alerting and waiting for
+    the user to think to follow up, propose one bounded, already-existing
+    action -- hiring a researcher employee to look up the device's MAC
+    vendor for more context -- through JarvisAdmin's existing yes/no
+    approval gate. Deliberately does NOT do anything more autonomous than
+    that: there's no real "block this device" capability in this project
+    (that would be router-specific and a separate, bigger ask) -- this only
+    ever results in a read-only research job, never an action with a real
+    effect. No-op if JarvisAdmin isn't configured, same opt-in-at-the-
+    call-site pattern tools.system_power already uses."""
+    if not jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        return
+    devices = tools.LAST_SECURITY_RESULT.get("new_device_list") or []
+    if not devices:
+        return
+    desc = ", ".join(f"{d['mac']} ({d['ip']})" for d in devices)
+    approved, _status = jarvis_admin.request_approval(
+        f"look up the vendor/manufacturer of the new device(s) on your LAN ({desc}) for more context")
+    if not approved:
+        return
+    for d in devices:
+        employees.enqueue_job(
+            "researcher",
+            f"Look up what device/manufacturer typically uses the MAC address prefix {d['mac'][:8]} "
+            f"and whether a device at {d['ip']} on a home LAN is likely benign or worth investigating.",
+            auto=True,
+        )
 
 
 _SPEEDTEST_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
@@ -915,11 +1112,99 @@ def _speedtest_watcher_thread():
             print(f"  [Speedtest] {e}")
 
 
-def _on_important_email(category, summary):
-    text = f"You've got an important email sir: {summary}"
+_PC_HEALTH_INTERVAL_SECONDS = 2  # feeds the HUD's live PcInternals 3D model
+
+
+def _read_cpu_times():
+    """(idle_jiffies, total_jiffies) from /proc/stat's aggregate cpu line --
+    a single read is meaningless for CPU%, which needs a delta between two
+    samples over a known interval (see _pc_health_watcher_thread below)."""
+    with open("/proc/stat", "r", encoding="utf-8") as f:
+        parts = f.readline().split()[1:]
+    values = [int(x) for x in parts]
+    idle = values[3] + values[4]  # idle + iowait
+    return idle, sum(values)
+
+
+def _pc_health_watcher_thread():
+    """Live CPU/memory/disk/temp feed for the HUD's PcInternals 3D model
+    (see ArcReactor.tsx's "pc_health" WebSocket case) -- deliberately
+    separate from check_system_health's existing 2-hour alert cycle
+    (tools.py), which keeps doing its own Telegram/voice alerting and
+    ~/.jarvis/health_log.jsonl logging unchanged. This one only ever
+    broadcasts a live number for the 3D display every few seconds; it
+    never alerts and never writes a log file. All reads are the same
+    lightweight /proc and /sys style already used elsewhere in this
+    project (tools._read_linux_temps, tools.py's own CPU-free philosophy)
+    -- no psutil, no subprocess per tick, cheap enough to poll this often.
+    Linux-only (/proc/stat, /proc/meminfo) -- only started on that platform,
+    see the thread-start block below; PcInternals.tsx just shows "–"
+    placeholders if no pc_health message ever arrives, same as before any
+    connection at all."""
+    prev_idle, prev_total = _read_cpu_times()
+    while not pipeline_stop.is_set():
+        if pipeline_stop.wait(_PC_HEALTH_INTERVAL_SECONDS):
+            break
+        try:
+            idle, total = _read_cpu_times()
+            d_idle, d_total = idle - prev_idle, total - prev_total
+            cpu_pct = 100.0 * (1 - d_idle / d_total) if d_total > 0 else 0.0
+            prev_idle, prev_total = idle, total
+
+            meminfo = {}
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    key, _, rest = line.partition(":")
+                    meminfo[key] = int(rest.strip().split()[0])  # kB
+            mem_total = meminfo.get("MemTotal", 1)
+            mem_avail = meminfo.get("MemAvailable", mem_total)
+            mem_pct = 100.0 * (1 - mem_avail / mem_total) if mem_total else 0.0
+
+            _total, _used, free = shutil.disk_usage(tools._DISK_ROOT)
+            disk_pct = 100.0 * (1 - free / _total) if _total else 0.0
+
+            _zone, hottest = tools._hottest_reading(tools._read_linux_temps())
+
+            _ws_broadcast({
+                "type": "pc_health",
+                "cpu_pct": round(cpu_pct, 1),
+                "mem_pct": round(mem_pct, 1),
+                "disk_pct": round(disk_pct, 1),
+                "temp_c": round(hottest, 1) if hottest is not None else None,
+            })
+        except Exception as e:
+            print(f"  [PcHealth] {e}")
+
+
+def _employee_worker_thread():
+    """Runs employees.worker_loop() in this, jarvis.py's own long-lived
+    process -- see employees.py's module docstring for why background
+    employee jobs have to run here rather than inside hire_employee itself
+    (which usually executes in a short-lived per-command MCP subprocess
+    that exits, taking any thread it spawned with it, the moment that one
+    command finishes)."""
+    employees.worker_loop(pipeline_stop)
+
+
+def _agent_scheduler_thread():
+    """Polls agent_registry for agents whose schedule is due and enqueues
+    them into employees.py's existing job queue -- the same
+    _employee_worker_thread above still does all actual execution, so this
+    thread never runs anything itself, just decides when to enqueue.
+    30s resolution is plenty for "every N minutes" schedules and matches
+    the polling cadence of Jarvis's other watcher threads."""
+    while not pipeline_stop.is_set():
+        for agent in agent_registry.due_agents():
+            agent_registry.run_agent_now(agent["id"], auto=True)
+        if pipeline_stop.wait(30.0):
+            break
+
+
+def _on_important_email(provider, category, summary):
+    text = f"You've got an important email sir, on {provider}: {summary}"
     with _command_lock:
         speak(text)
-    _notify_all(f"[Email - {category}] {summary}")
+    _notify_all(f"[Email - {provider} - {category}] {summary}")
 
 
 def _sms_command_thread():
@@ -932,6 +1217,26 @@ def _telegram_command_thread():
     def on_command(body):
         handle_command(body, acked=True, notify=telegram_bridge.send_message)
     telegram_bridge.poll_thread(on_command, pipeline_stop)
+
+
+def _email_command_thread():
+    """JarvisEmail's own two-way channel -- routes through the SAME full
+    handle_command() brain as the main bridge (not a narrower, fixed-
+    response bot like CPU_Alerts/Improvement below), since the whole point
+    is open-ended "ask anything about my mail/calendar" Q&A and actions.
+    See jarvis_email_bot.poll_thread()."""
+    def on_command(body):
+        handle_command(body, acked=True, notify=jarvis_email_bot.send_message)
+    jarvis_email_bot.poll_thread(on_command, pipeline_stop)
+
+
+def _outlook_command_thread():
+    """JarvisOutlook -- same setup as JarvisEmail (see jarvis_email_bot.py's
+    docstring), just its own dedicated bot/chat channel into the same full
+    brain. See jarvis_outlook_bot.poll_thread()."""
+    def on_command(body):
+        handle_command(body, acked=True, notify=jarvis_outlook_bot.send_message)
+    jarvis_outlook_bot.poll_thread(on_command, pipeline_stop)
 
 
 def _cpu_alerts_command_thread():
@@ -1090,19 +1395,32 @@ def voice_loop():
     start_ws_server()
     if PLAID_AVAILABLE:
         plaid_service.start_server()
+    dashboard_server.register_command_handler(handle_command)
+    dashboard_server.register_frame_handler(_on_camera_frame)
+    dashboard_server.register_gesture_handler(_on_hand_gesture)
     dashboard_server.start_server()
+    bot_events.subscribe(_on_bot_event)
 
     threading.Thread(target=mic_thread, daemon=True, name="Mic").start()
     threading.Thread(target=recognition_thread, daemon=True, name="Vosk").start()
     threading.Thread(target=_reminder_watcher_thread, daemon=True, name="Reminders").start()
     threading.Thread(target=_health_watcher_thread, daemon=True, name="Health").start()
+    threading.Thread(target=_finance_watcher_thread, daemon=True, name="FinanceWatch").start()
+    threading.Thread(target=_employee_worker_thread, daemon=True, name="EmployeeWorker").start()
+    threading.Thread(target=_agent_scheduler_thread, daemon=True, name="AgentScheduler").start()
     threading.Thread(target=_improvement_watcher_thread, daemon=True, name="Improvement").start()
+    threading.Thread(target=_daily_briefing_thread, daemon=True, name="DailyBriefing").start()
     threading.Thread(target=_sms_command_thread, daemon=True, name="SMS").start()
     threading.Thread(target=_telegram_command_thread, daemon=True, name="Telegram").start()
+    threading.Thread(target=_email_command_thread, daemon=True, name="EmailTelegram").start()
+    threading.Thread(target=_outlook_command_thread, daemon=True, name="OutlookTelegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
     threading.Thread(target=_network_watch_thread, daemon=True, name="NetworkWatch").start()
     threading.Thread(target=_security_watcher_thread, daemon=True, name="Security").start()
+    threading.Thread(target=_deep_security_watcher_thread, daemon=True, name="DeepSecurity").start()
     threading.Thread(target=_speedtest_watcher_thread, daemon=True, name="Speedtest").start()
+    if not IS_WINDOWS:
+        threading.Thread(target=_pc_health_watcher_thread, daemon=True, name="PcHealth").start()
     threading.Thread(target=_cpu_alerts_command_thread, daemon=True, name="CPUAlertsTelegram").start()
     threading.Thread(target=_improvement_command_thread, daemon=True, name="ImprovementTelegram").start()
     threading.Thread(target=_security_command_thread, daemon=True, name="SecurityTelegram").start()
@@ -1167,6 +1485,20 @@ def main():
     print("  Running headless. Press Ctrl+C to stop.")
     try:
         while not pipeline_stop.is_set():
+            # pygame.mixer (TTS playback) initializes SDL under the hood the
+            # first time anything speaks -- which can happen on any
+            # background thread (e.g. the WS "hud_ready" handler) -- and SDL
+            # grabs SIGINT/SIGQUIT/SIGTERM by default to post an internal
+            # SDL_QUIT event that this headless app never pumps, silently
+            # swallowing termination signals entirely (confirmed live: a
+            # real SIGTERM was ignored for 90+ seconds until systemd force-
+            # killed it). signal.signal() only works from the main thread,
+            # so it can't be fixed at the point pygame claims it -- instead
+            # the main thread keeps reasserting the correct handler here on
+            # every tick, which bounds worst-case shutdown latency to one
+            # tick regardless of which thread touched the mixer first.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.default_int_handler)
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass

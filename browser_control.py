@@ -230,6 +230,50 @@ _current_queue = None
 _worker_alive = False
 _next_generation = 0
 
+# OS process IDs (browser + its renderer/GPU/utility children) currently
+# belonging to the dedicated Jarvis browser window, refreshed on every
+# (re)launch/navigation below. Playwright's bundled Chromium binary is
+# literally named chrome.exe on Windows -- the same image name tools.py's
+# close_app("chrome") targets for the user's separate, ordinary system
+# Chrome -- so without this, "Jarvis, close chrome" would taskkill this
+# automation window right out from under an in-progress play_youtube,
+# indistinguishable from a crash. close_app() consults owned_pids() so it
+# only ever kills chrome.exe processes *other* than this one.
+_owned_pids_lock = threading.Lock()
+_owned_pids = set()
+
+
+def _refresh_owned_pids(context):
+    """Best-effort: snapshot the real OS PIDs Chromium reports owning (via a
+    browser-level CDP session, not a page-level one -- SystemInfo.getProcessInfo
+    is only available at that scope) and publish them for owned_pids(). Must
+    run on the browser worker thread, same as every other Playwright call
+    here. Never raises -- a failed refresh just means the previous snapshot
+    (possibly empty) is kept, which is the safe direction to fail in: it can
+    only under-protect this window, never over-protect an unrelated one."""
+    global _owned_pids
+    try:
+        cdp = context.browser.new_browser_cdp_session()
+        try:
+            info = cdp.send("SystemInfo.getProcessInfo")
+            pids = {int(p["id"]) for p in info.get("processInfo", []) if "id" in p}
+        finally:
+            cdp.detach()
+    except Exception:
+        return
+    if pids:
+        with _owned_pids_lock:
+            _owned_pids = pids
+
+
+def owned_pids() -> set:
+    """Read-only snapshot of the OS process IDs currently belonging to the
+    dedicated Jarvis browser window, if one is open (empty otherwise/if the
+    module failed to load). Never touches the worker thread -- safe to call
+    from anywhere, anytime, including while the worker is busy or wedged."""
+    with _owned_pids_lock:
+        return set(_owned_pids)
+
 # Raised on the worker thread (relaunch=False) when there's no live page to
 # act on; matched by string in control()/read_page() to give a friendlier
 # reply than the raw RuntimeError.
@@ -335,6 +379,7 @@ def _launch_context(p, profile_dir, active):
     _watch_context_for_stray_pages(context, active)
     page = context.pages[0] if context.pages else context.new_page()
     crash_flag = _watch_page(context, page, active)
+    _refresh_owned_pids(context)
     return context, page, crash_flag
 
 
@@ -365,6 +410,7 @@ def _recover(old_page, context, p, profile_dir, active):
                 except Exception:
                     pass
             crash_flag = _watch_page(context, new_page, active)
+            _refresh_owned_pids(context)
             return context, new_page, crash_flag
         try:
             context.close()
@@ -417,6 +463,9 @@ def _worker_thread(q: "queue.Queue", profile_dir):
                 context.close()
             except Exception:
                 pass
+        global _owned_pids
+        with _owned_pids_lock:
+            _owned_pids = set()
 
 
 def shutdown():
@@ -453,6 +502,7 @@ def _do_open_url(url, page):
     except Exception:
         pass
     _focus_window(page)
+    _refresh_owned_pids(page.context)
     return (page.title() or "").strip()
 
 
@@ -505,6 +555,7 @@ def _do_play_youtube(query, page):
     first.click()
     page.wait_for_selector("video", timeout=15000)
     _focus_window(page)
+    _refresh_owned_pids(page.context)
     return title
 
 

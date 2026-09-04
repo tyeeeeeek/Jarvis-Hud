@@ -85,29 +85,33 @@ def send_test_message() -> bool:
                   "the JarSecurity Telegram pipeline is working.")
 
 
+def respond(text: str) -> str:
+    """Answer one message the same way this bot's Telegram two-way channel
+    does: pulls tools.security_status_report() -- a read-only summary of
+    recent sweeps and jobs from ~/.jarvis/security_log.jsonl and the shared
+    delivery log -- and grounds a reply in it via telegram_common.
+    ask_grounded() so the reply actually answers what was asked instead of
+    always sending the same fixed dump. Shared by poll_thread() (Telegram)
+    and the phone dashboard's chat. Deliberately doesn't trigger a fresh
+    run_security_check() itself (that sweep touches the network and the
+    browser and can take a while); it just reports what the scheduled
+    4-hour sweep has already found, so the reply is fast. tools is imported
+    locally, not at module load time, because tools.py imports this module
+    -- importing it back up top would be a circular import."""
+    import tools
+    try:
+        report = tools.security_status_report()
+    except Exception as e:
+        return f"Couldn't pull a security status report sir: {e}"
+    return telegram_common.ask_grounded(
+        _AGENT_NAME, "monitoring this PC's cybersecurity status and reporting sweep findings",
+        report, text)
+
+
 def poll_thread(pipeline_stop) -> None:
     """This bot's two-way half: long-polls its own token/chat (isolated from
-    every other bot's inbox) and, on any incoming text message, pulls
-    tools.security_status_report() -- a read-only summary of recent sweeps
-    and jobs from ~/.jarvis/security_log.jsonl and the shared delivery log
-    -- and replies with that summary put through
-    telegram_common.ask_grounded() so the reply actually answers what was
-    asked instead of always sending the same fixed dump. Deliberately
-    doesn't trigger a fresh run_security_check() itself (that sweep touches
-    the network and the browser and can take a while); it just reports what
-    the scheduled 4-hour sweep has already found, so the reply is fast.
-    tools is imported locally, not at module load time, because tools.py
-    imports this module -- importing it back up top would be a circular
-    import."""
+    every other bot's inbox) and replies to any incoming text via
+    respond()."""
     def on_message(text):
-        import tools
-        try:
-            report = tools.security_status_report()
-        except Exception as e:
-            _send(f"Couldn't pull a security status report sir: {e}")
-            return
-        reply = telegram_common.ask_grounded(
-            _AGENT_NAME, "monitoring this PC's cybersecurity status and reporting sweep findings",
-            report, text)
-        _send(reply)
+        _send(respond(text))
     telegram_common.poll_thread(BOT_TOKEN, CHAT_ID, on_message, pipeline_stop, agent=_AGENT_NAME)

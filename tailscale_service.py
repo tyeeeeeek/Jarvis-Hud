@@ -25,8 +25,10 @@
 #   used for launch_app/close_app elsewhere in this project.
 # ================================================================
 import json
+import os
 import shutil
 import subprocess
+import time
 
 TAILSCALE_BIN = shutil.which("tailscale")
 TAILSCALE_AVAILABLE = bool(TAILSCALE_BIN)
@@ -76,6 +78,11 @@ def get_status():
         "backend_state": data.get("BackendState", "unknown"),
         "self_name": self_node.get("HostName", "unknown"),
         "self_ip": (self_node.get("TailscaleIPs") or [None])[0],
+        # MagicDNS name (e.g. "my-pc.tailnetname.ts.net.") -- only this
+        # (never the bare IP) is eligible for a trusted HTTPS cert via
+        # ensure_https_cert() below, since Let's Encrypt certs are issued
+        # per-hostname, not per-IP.
+        "self_dns_name": (self_node.get("DNSName") or "").rstrip("."),
         "using_exit_node": bool(self_node.get("ExitNode")),
         "peers": peers,
     }
@@ -165,3 +172,49 @@ def disconnect():
             raise RuntimeError(f"I need permission first -- {_OPERATOR_HINT}")
         raise RuntimeError((result.stderr or result.stdout).strip())
     return {"ok": True}
+
+
+_CERT_DIR = os.path.join(os.path.expanduser("~"), ".jarvis", "https")
+_CERT_MAX_AGE_SECONDS = 60 * 24 * 60 * 60  # renew after 60 days (Tailscale certs are valid ~90)
+
+
+def ensure_https_cert():
+    """Gets (provisioning or reusing a cached) a real, browser-trusted
+    HTTPS cert for this machine's Tailscale MagicDNS name, via `tailscale
+    cert` -- Tailscale's own built-in Let's Encrypt integration for
+    tailnet devices. Needed because phone browsers refuse camera
+    (getUserMedia) and speech-recognition access on a plain-HTTP origin,
+    and the phone dashboard/HUD only work at all if the browser treats
+    the page as a secure context -- see README "Phone HUD (Iron Man
+    desk-view camera)".
+
+    Returns (cert_path, key_path, dns_name) on success, or None if HTTPS
+    certs aren't available (Tailscale not installed/connected, or the
+    tailnet's admin console hasn't turned on "HTTPS Certificates" under
+    DNS settings -- a one-time toggle at https://login.tailscale.com/admin/dns).
+    Never raises -- the caller (dashboard_server.py) falls back to plain
+    HTTP (camera/mic simply won't work there) rather than failing to
+    start the whole dashboard over this.
+    """
+    if not TAILSCALE_AVAILABLE:
+        return None
+    try:
+        status = get_status()
+    except Exception:
+        return None
+    dns_name = status.get("self_dns_name")
+    if not dns_name:
+        return None
+
+    cert_path = os.path.join(_CERT_DIR, f"{dns_name}.crt")
+    key_path = os.path.join(_CERT_DIR, f"{dns_name}.key")
+
+    if (os.path.isfile(cert_path) and os.path.isfile(key_path)
+            and time.time() - os.path.getmtime(cert_path) < _CERT_MAX_AGE_SECONDS):
+        return (cert_path, key_path, dns_name)
+
+    os.makedirs(_CERT_DIR, exist_ok=True)
+    result = _run(["cert", "--cert-file", cert_path, "--key-file", key_path, dns_name], timeout=30)
+    if result.returncode != 0 or not (os.path.isfile(cert_path) and os.path.isfile(key_path)):
+        return None
+    return (cert_path, key_path, dns_name)

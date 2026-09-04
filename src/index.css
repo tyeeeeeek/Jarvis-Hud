@@ -1,3 +1,10 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --hud-font: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  --hud-cyan: #00f0ff;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -11,5 +18,5 @@ html, body, #root {
 }
 
 body {
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--hud-font);
 }

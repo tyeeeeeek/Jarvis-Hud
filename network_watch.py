@@ -27,8 +27,11 @@ import re
 import json
 import time
 import shutil
+import socket
 import ipaddress
 import subprocess
+
+import requests
 
 JARVIS_DIR = os.path.join(os.path.expanduser("~"), ".jarvis")
 KNOWN_DEVICES_PATH = os.path.join(JARVIS_DIR, "known_devices.json")
@@ -167,6 +170,96 @@ def scan():
     ]
     devices.sort(key=lambda d: [int(o) for o in d["ip"].split(".")])
     return {"subnet": subnet, "devices": devices, "new_count": len(new_macs), "scanned_at": now}
+
+
+def scan_ports(ip):
+    """On-demand, single-host port scan (nmap's default top-100 ports) --
+    NOT a subnet-wide port sweep, and never run automatically; only from an
+    explicit "scan ports" click on one already-discovered device in the
+    Homelab widget. Kept separate from scan()'s ping sweep on purpose (see
+    module docstring: that one is read-only-by-design and deliberately
+    never touches ports) so this stays an opt-in, single-target action.
+    Returns {"ip", "ports": [{"port","proto","service"}], "scanned_at"} for
+    each OPEN port found, or {"error": ...}. `service` includes real
+    detected version info (nmap -sV, light intensity so this stays fast --
+    no root needed for this), not just a port-number guess -- e.g. "ssh
+    OpenSSH 8.9p1" instead of just "ssh"."""
+    if not NMAP_AVAILABLE:
+        return {"error": "nmap isn't installed sir -- run: sudo apt install nmap"}
+    try:
+        ipaddress.ip_address(ip)  # reject anything that isn't a literal IP, not just for subprocess safety (a list arg is already shell-safe) but so this can never be pointed at a flag-like string smuggled in as "ip"
+    except ValueError:
+        return {"error": "invalid IP"}
+    try:
+        result = subprocess.run(
+            [NMAP_BIN, "-sV", "--version-intensity", "0", "-T4", "--top-ports", "100", "-Pn", ip],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+    ports = []
+    for line in result.stdout.splitlines():
+        m = re.match(r"^(\d+)/(tcp|udp)\s+(\S+)\s+(.*)$", line.strip())
+        if m and m.group(3) == "open":
+            ports.append({"port": int(m.group(1)), "proto": m.group(2), "service": m.group(4).strip() or "unknown"})
+    return {"ip": ip, "ports": ports, "scanned_at": time.time()}
+
+
+def hostname_for(ip):
+    """Best-effort reverse-DNS/NetBIOS lookup for one device -- on-demand
+    only (not run automatically for every device on every scan, since a
+    resolver timeout per device would make an N-device scan take up to N
+    times as long). Returns the hostname string, or None if nothing
+    resolves within the short timeout."""
+    old_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(1.5)
+    try:
+        name, _aliases, _addrs = socket.gethostbyaddr(ip)
+        return name
+    except Exception:
+        return None
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+
+
+def detect_gateway():
+    """This machine's own default-route gateway IP -- the real router/AP
+    hardware's LAN address, read from `ip route`, not guessed. Returns the
+    IP string, or None if it can't be determined."""
+    try:
+        route = subprocess.run(["ip", "-o", "-4", "route", "show", "default"],
+                                capture_output=True, text=True, timeout=5)
+        m = re.search(r"via (\d+\.\d+\.\d+\.\d+)", route.stdout)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def probe_http(ip):
+    """Best-effort HTTP banner grab against one device's web UI (port 80,
+    then 443) -- no credentials, just a plain GET a browser on the LAN
+    could make. Returns {"reachable","port","server","title"} -- server is
+    whatever the Server: response header says (many router/NAS/IoT web UIs
+    self-identify there), title is the page's <title> tag if present.
+    Never raises; a device with no web UI just comes back
+    {"reachable": False}."""
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return {"reachable": False}
+    for port, scheme in ((80, "http"), (443, "https")):
+        try:
+            r = requests.get(f"{scheme}://{ip}", timeout=2.5, verify=False)
+            title_m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.IGNORECASE | re.DOTALL)
+            return {
+                "reachable": True, "port": port,
+                "server": r.headers.get("Server"),
+                "title": title_m.group(1).strip()[:80] if title_m else None,
+            }
+        except Exception:
+            continue
+    return {"reachable": False}
 
 
 def last_scan_summary():

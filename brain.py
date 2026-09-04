@@ -20,8 +20,10 @@
 #   jarvis__* tools exist.
 # ================================================================
 import os, sys, json, shutil, tempfile, subprocess, threading
+from datetime import datetime
 
 import tools
+import memory_store
 
 HOME = os.path.expanduser("~")
 CLAUDE_CLI = shutil.which("claude") or os.path.join(
@@ -48,7 +50,11 @@ PERSONA = (
     "recap of recent conversation (possibly from an earlier session) before "
     "the current request -- use it naturally to stay consistent and resolve "
     "references like \"it\" or \"that\", but never read the recap back to "
-    "the user or mention that you were given one."
+    "the user or mention that you were given one. You're also given the "
+    "current real date and time before each request -- use it to resolve "
+    "relative dates (\"tomorrow\", \"next Friday\", \"in an hour\") into "
+    "real ISO 8601 datetimes for tools like create_calendar_event, but "
+    "never read it back to the user unless they actually asked the time."
 )
 
 
@@ -84,8 +90,11 @@ _CAPTION_OVERRIDES = {
     "describe_screen": lambda a: "Taking a look",
     "set_reminder": lambda a: "Setting that reminder",
     "add_note": lambda a: "Saving that note",
+    "remember_this": lambda a: "Remembering that",
+    "recall_memory": lambda a: "Checking my memory",
     "list_notes": lambda a: "Pulling up your notes",
     "draft_email": lambda a: "Drafting that email",
+    "create_calendar_event": lambda a: f"Adding {a.get('title', 'that')} to your calendar",
     "check_disk_space": lambda a: "Checking disk space",
     "clean_disk": lambda a: "Cleaning up disk space",
     "media_control": lambda a: "Adjusting playback",
@@ -149,8 +158,37 @@ def run_agent(command, on_activity=None, on_creation=None, on_process=None):
         return None
 
     config_path = _ensure_mcp_config()
+    # Claude Code's own default environment context (which normally includes
+    # today's date) is fully replaced by --system-prompt below, not appended
+    # to -- so without this, "tomorrow at 3pm" (a reminder, a calendar event)
+    # has nothing real to resolve against. Given directly in the prompt
+    # rather than PERSONA so it's always fresh, never stale from an earlier
+    # process start.
+    now_line = f"Current date and time: {datetime.now().strftime('%A, %B %d, %Y, %I:%M %p')} (local)."
     history = tools.recent_conversation_context()
-    prompt = f"{history}\n\nCurrent request: {command}" if history else command
+
+    # Ambient long-term memory recall -- distinct from `history` above
+    # (a short rolling window of the last few turns): this can surface a
+    # fact or preference from days/weeks ago. fallback_to_recent=False on
+    # purpose -- unlike the explicit recall_memory tool, showing unrelated
+    # recent memories on every single command would just be noise, not
+    # useful context, so this only injects anything when there's a real
+    # keyword match.
+    memory_block = ""
+    try:
+        hits = memory_store.recall(command, limit=4, fallback_to_recent=False)
+        if hits:
+            memory_block = "Relevant things you remember about the user:\n" + "\n".join(f"- {h['text']}" for h in hits)
+    except Exception:
+        pass
+
+    parts = [now_line]
+    if memory_block:
+        parts.append(memory_block)
+    if history:
+        parts.append(history)
+    parts.append(f"Current request: {command}")
+    prompt = "\n\n".join(parts)
     argv = [
         CLAUDE_CLI, "-p", prompt,
         "--mcp-config", config_path, "--strict-mcp-config",
@@ -255,5 +293,10 @@ def run_agent(command, on_activity=None, on_creation=None, on_process=None):
             tools.record_conversation_turn(command, final_text)
         except Exception:
             pass
+        # Passive long-term memory capture -- backgrounded so a slow/
+        # unreachable local Ollama can never delay the actual reply the
+        # user is waiting on; best-effort and silent by design (see
+        # memory_store.maybe_capture's own docstring).
+        threading.Thread(target=memory_store.maybe_capture, args=(command, final_text), daemon=True).start()
 
     return final_text

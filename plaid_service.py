@@ -283,6 +283,41 @@ def _homelab_network_scan():
     return jsonify(network_watch.scan())
 
 
+@app.route("/homelab/network/ports")
+def _homelab_network_ports():
+    """On-demand port scan of ONE already-discovered device -- see
+    network_watch.scan_ports's docstring for why this is a separate,
+    explicit, single-host action rather than folded into the ping sweep."""
+    return jsonify(network_watch.scan_ports(request.args.get("ip", "")))
+
+
+@app.route("/homelab/network/gateway")
+def _homelab_network_gateway():
+    return jsonify({"gateway": network_watch.detect_gateway()})
+
+
+@app.route("/homelab/network/hostname")
+def _homelab_network_hostname():
+    return jsonify({"hostname": network_watch.hostname_for(request.args.get("ip", ""))})
+
+
+@app.route("/homelab/network/probe")
+def _homelab_network_probe():
+    return jsonify(network_watch.probe_http(request.args.get("ip", "")))
+
+
+@app.route("/homelab/health")
+def _homelab_health():
+    """Read-only: the PC Jarvis itself runs on -- CPU thermal state and
+    disk headroom from the last periodic check_system_health() run (the
+    watcher thread that already runs every 2 hours in jarvis.py), never a
+    fresh check triggered by this route. Local import: tools.py imports
+    plaid_service (see PLAID_AVAILABLE at its top), so importing tools back
+    at this module's top level would be circular."""
+    import tools
+    return jsonify(tools.LAST_HEALTH_RESULT or {})
+
+
 def start_server():
     statements_service.ensure_statements_dir()
 

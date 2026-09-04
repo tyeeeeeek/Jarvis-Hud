@@ -1,0 +1,1373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Jarvis Control</title>
+<style>
+  :root {
+    --bg: #16171b;
+    --bg-rail: #101114;
+    --bg-panel: #1e2024;
+    --bg-card: #26282e;
+    --bg-hover: #2e3038;
+    --bg-input: #2a2c33;
+    --border: #34363d;
+    --text: #eef0f4;
+    --text-dim: #9297a3;
+    --text-faint: #5b5f6b;
+    --accent: #7c6cf0;
+    --accent-dim: rgba(124,108,240,0.18);
+    --online: #35c471;
+    --busy: #f2b23c;
+    --offline: #5b5f6b;
+    --err: #ef5a6f;
+    --err-dim: rgba(239,90,111,0.14);
+    --ok-dim: rgba(53,196,113,0.14);
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    display: flex; flex-direction: column;
+  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  button { font-family: inherit; }
+
+  /* ---------- gate ---------- */
+  #gate {
+    position: fixed; inset: 0; background: var(--bg); z-index: 100;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px;
+  }
+  #gate.hidden { display: none; }
+  #gate .logo {
+    width: 56px; height: 56px; border-radius: 16px; background: linear-gradient(135deg, var(--accent), #4b3fb0);
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 22px;
+  }
+  #gate h1 { font-size: 18px; font-weight: 600; margin: 0; }
+  #gate p { color: var(--text-dim); font-size: 13px; margin: -10px 0 4px; text-align: center; }
+  #gate input {
+    width: 100%; max-width: 320px; background: var(--bg-input); border: 1px solid var(--border);
+    color: var(--text); padding: 13px 14px; font-family: inherit; font-size: 14px;
+    border-radius: 10px; outline: none;
+  }
+  #gate input:focus { border-color: var(--accent); }
+  #gate button {
+    width: 100%; max-width: 320px; background: var(--accent); border: none; color: white;
+    padding: 13px 14px; font-weight: 600; font-size: 14px; border-radius: 10px; cursor: pointer;
+  }
+  #gate button:active { opacity: 0.85; }
+  #gateError { color: var(--err); font-size: 12px; min-height: 14px; }
+
+  /* ---------- app shell ---------- */
+  #app { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  header .title { font-size: 16px; font-weight: 700; }
+  #connState { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-faint); }
+  #connState .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--err); transition: background-color 0.3s, box-shadow 0.3s; }
+  #connState .dot.live { background: var(--online); box-shadow: 0 0 6px 1px rgba(53,196,113,0.7); animation: connGlow 2.4s ease-in-out infinite; }
+  @keyframes connGlow { 0%,100% { box-shadow: 0 0 4px 0px rgba(53,196,113,0.55); } 50% { box-shadow: 0 0 9px 2px rgba(53,196,113,0.9); } }
+
+  main { flex: 1; overflow: hidden; position: relative; }
+  .tab { display: none; height: 100%; overflow-y: auto; padding: 12px 14px 20px; }
+  .tab.active { display: block; }
+
+  /* ---------- chats: contact list ---------- */
+  .contact {
+    display: flex; align-items: center; gap: 12px; padding: 11px 8px; border-radius: 12px; cursor: pointer;
+  }
+  .contact:active { background: var(--bg-hover); }
+  .avatar {
+    position: relative; width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; color: white;
+  }
+  .avatar .status-dot {
+    position: absolute; bottom: -1px; right: -1px; width: 12px; height: 12px; border-radius: 50%;
+    border: 2.5px solid var(--bg); background: var(--offline);
+  }
+  .avatar .status-dot.on { background: var(--online); }
+  .avatar .status-dot.busy { background: var(--busy); }
+  .contact-info { flex: 1; min-width: 0; }
+  .contact-name { font-size: 14.5px; font-weight: 600; }
+  .contact-sub { font-size: 12.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .badge {
+    background: var(--accent); color: white; font-size: 11px; font-weight: 700; min-width: 18px; height: 18px;
+    border-radius: 9px; display: flex; align-items: center; justify-content: center; padding: 0 5px;
+  }
+
+  /* ---------- chat detail (overlay) ---------- */
+  #chatDetail {
+    position: absolute; inset: 0; background: var(--bg); z-index: 10;
+    display: none; flex-direction: column;
+  }
+  #chatDetail.open { display: flex; }
+  .chat-header {
+    display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .chat-header .back { background: none; border: none; color: var(--text); font-size: 20px; cursor: pointer; padding: 4px 8px 4px 0; }
+  .chat-header .who { flex: 1; cursor: pointer; }
+  .chat-header .who-name { font-size: 14.5px; font-weight: 700; }
+  .chat-header .who-status { font-size: 11.5px; color: var(--text-dim); }
+  .chat-body { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 78%; padding: 10px 13px; border-radius: 16px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .bubble.user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 4px; }
+  .bubble.bot { align-self: flex-start; background: var(--bg-card); border-bottom-left-radius: 4px; }
+  .bubble.pending { align-self: flex-start; background: var(--bg-card); color: var(--text-dim); font-style: italic; }
+  .chat-empty { color: var(--text-faint); font-size: 13px; text-align: center; margin-top: 40px; }
+  .chat-input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  .chat-input-row input {
+    flex: 1; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
+    padding: 11px 14px; border-radius: 20px; font-size: 14px; outline: none;
+  }
+  .chat-input-row input:focus { border-color: var(--accent); }
+  .chat-input-row button {
+    background: var(--accent); border: none; color: white; width: 40px; height: 40px; border-radius: 50%;
+    font-size: 16px; cursor: pointer; flex-shrink: 0;
+  }
+
+  /* ---------- profile modal ---------- */
+  #profileModal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 30; display: none;
+    align-items: flex-end; justify-content: center;
+  }
+  #profileModal.open { display: flex; }
+  .profile-sheet {
+    background: var(--bg-panel); width: 100%; max-width: 480px; border-radius: 20px 20px 0 0;
+    padding: 24px 20px 28px; text-align: center;
+  }
+  .profile-sheet .avatar { width: 72px; height: 72px; font-size: 26px; margin: 0 auto 12px; }
+  .profile-sheet h2 { margin: 0 0 4px; font-size: 18px; }
+  .profile-sheet .role { color: var(--text-dim); font-size: 13px; margin-bottom: 14px; }
+  .profile-sheet .stat-row { display: flex; justify-content: space-between; padding: 10px 4px; border-top: 1px solid var(--border); font-size: 13px; }
+  .profile-sheet .stat-label { color: var(--text-dim); }
+  .profile-sheet button.close {
+    margin-top: 16px; background: var(--bg-card); border: none; color: var(--text); padding: 11px 20px;
+    border-radius: 10px; font-size: 13px; cursor: pointer; width: 100%;
+  }
+
+  /* ---------- admin approval card ---------- */
+  .approval-card { margin: 14px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: var(--radius); padding: 16px; }
+  .approval-card .lock { font-size: 24px; margin-bottom: 6px; }
+  .approval-card p { font-size: 14px; line-height: 1.5; margin: 0 0 14px; }
+  .approval-actions { display: flex; gap: 10px; }
+  .approval-actions button { flex: 1; padding: 12px; border-radius: 10px; border: none; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .approve-btn { background: var(--online); color: #06210f; }
+  .deny-btn { background: var(--err); color: #310a10; }
+  .no-pending { text-align: center; color: var(--text-faint); font-size: 13px; margin-top: 60px; }
+
+  /* ---------- tools ---------- */
+  #search {
+    width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
+    padding: 11px 14px; border-radius: 10px; font-size: 14px; margin-bottom: 12px; outline: none;
+  }
+  #search:focus { border-color: var(--accent); }
+  .card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
+  .card .name { font-size: 14px; font-weight: 700; }
+  .card .desc { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.4; }
+  .params { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; }
+  .param-label { font-size: 11px; color: var(--text-faint); margin-bottom: 3px; }
+  .params input {
+    width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 8px; font-size: 13px; outline: none;
+  }
+  .run-btn {
+    margin-top: 10px; background: var(--accent); border: none; color: white; padding: 9px 16px;
+    border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .result-box { margin-top: 10px; font-size: 12.5px; padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
+  .result-box.ok { background: var(--ok-dim); color: #7de3a2; }
+  .result-box.err { background: var(--err-dim); color: #f3899a; }
+  .result-box.pending { background: var(--bg-card); color: var(--text-dim); }
+
+  /* ---------- team ---------- */
+  .hire-form select, .hire-form textarea {
+    width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: 8px; font-size: 13px; font-family: inherit; outline: none; margin-bottom: 8px;
+  }
+  .hire-form select:focus, .hire-form textarea:focus { border-color: var(--accent); }
+  .status-pill { font-size: 10.5px; font-weight: 700; text-transform: uppercase; padding: 3px 9px; border-radius: 20px; letter-spacing: 0.3px; }
+  .status-pill.queued { background: var(--bg-hover); color: var(--text-dim); }
+  .status-pill.running { background: rgba(242,178,60,0.18); color: var(--busy); }
+  .status-pill.done { background: var(--ok-dim); color: #7de3a2; }
+  .status-pill.failed { background: var(--err-dim); color: #f3899a; }
+
+  /* ---------- org tree ---------- */
+  .tree-section { margin-bottom: 14px; }
+  .tree-header {
+    display: flex; align-items: center; gap: 6px; padding: 4px 4px 8px; cursor: pointer;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-faint); font-weight: 700;
+  }
+  .tree-header .chevron { transition: transform 0.15s; font-size: 9px; display: inline-block; }
+  .tree-header.collapsed .chevron { transform: rotate(-90deg); }
+  .tree-header .count { color: var(--text-faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .tree-list { display: flex; flex-direction: column; gap: 2px; }
+  .tree-list.collapsed { display: none; }
+  .tree-row { display: flex; align-items: center; gap: 10px; padding: 9px 8px; border-radius: 10px; cursor: pointer; }
+  .tree-row:active { background: var(--bg-hover); }
+  .tree-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--offline); flex-shrink: 0; }
+  .tree-dot.on { background: var(--online); }
+  .tree-dot.busy { background: var(--busy); animation: pulse 1.4s ease-in-out infinite; }
+  .tree-dot.bad { background: var(--err); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .tree-info { flex: 1; min-width: 0; }
+  .tree-name { font-size: 13.5px; font-weight: 600; }
+  .tree-sub { font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
+  .tree-empty { color: var(--text-faint); font-size: 12.5px; padding: 6px 8px 4px; }
+  .onboard-btn {
+    width: 100%; background: var(--bg-card); border: 1px dashed var(--border); color: var(--accent);
+    padding: 12px; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; margin-bottom: 16px;
+  }
+
+  /* ---------- onboard modal ---------- */
+  #onboardModal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 30; display: none;
+    align-items: flex-end; justify-content: center;
+  }
+  #onboardModal.open { display: flex; }
+  .onboard-sheet {
+    background: var(--bg-panel); width: 100%; max-width: 480px; border-radius: 20px 20px 0 0;
+    padding: 22px 20px 28px; max-height: 85vh; overflow-y: auto;
+  }
+  .onboard-sheet h2 { margin: 0 0 16px; font-size: 17px; }
+  .onboard-sheet label { display: block; font-size: 11px; color: var(--text-faint); margin: 12px 0 5px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .onboard-sheet input[type=text], .onboard-sheet input[type=number], .onboard-sheet select, .onboard-sheet textarea {
+    width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: 8px; font-size: 13.5px; font-family: inherit; outline: none;
+  }
+  .onboard-sheet textarea { resize: vertical; min-height: 60px; }
+  .kind-toggle, .trigger-choice { display: flex; gap: 8px; flex-direction: column; }
+  .kind-toggle { flex-direction: row; }
+  .kind-toggle button {
+    flex: 1; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 9px; border-radius: 8px; font-size: 12.5px; cursor: pointer; text-align: center;
+  }
+  .kind-toggle button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+  .trigger-row { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .trigger-row input[type=radio] { flex-shrink: 0; }
+  .trigger-row input[type=number] { width: 70px; margin-left: auto; }
+  .onboard-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .onboard-actions button { flex: 1; padding: 12px; border-radius: 10px; border: none; font-weight: 700; font-size: 13px; cursor: pointer; }
+  .onboard-actions .cancel-btn { background: var(--bg-card); color: var(--text); }
+  .onboard-actions .create-btn { background: var(--accent); color: white; }
+  .onboard-error { color: var(--err); font-size: 12.5px; margin-top: 8px; min-height: 14px; }
+
+  /* ---------- activity feed ---------- */
+  .feed-entry { padding: 11px 4px; border-bottom: 1px solid var(--border); }
+  .feed-entry .fe-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .feed-entry .fe-type { font-size: 12.5px; font-weight: 700; color: var(--accent); }
+  .feed-entry .fe-time { font-size: 11px; color: var(--text-faint); }
+  .feed-entry .fe-payload { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.4; }
+
+  /* ---------- bottom nav ---------- */
+  nav { display: flex; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--bg-rail); }
+  nav button {
+    position: relative; flex: 1; background: none; border: none; color: var(--text-faint); padding: 10px 4px 8px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.2px; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    transition: color 0.25s;
+  }
+  nav button .icon { font-size: 19px; transition: filter 0.25s; }
+  nav button.active { color: var(--accent); }
+  nav button.active .icon { filter: drop-shadow(0 0 5px var(--accent)); }
+  nav button::after {
+    content: ''; position: absolute; top: 0; left: 50%; width: 28px; height: 2px; border-radius: 2px;
+    background: var(--accent); transform: translateX(-50%) scaleX(0); opacity: 0;
+    transition: transform 0.25s cubic-bezier(0.22,1,0.36,1), opacity 0.25s;
+  }
+  nav button.active::after { transform: translateX(-50%) scaleX(1); opacity: 1; }
+
+  h3.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-faint); margin: 4px 4px 8px; font-weight: 700; }
+
+  /* ---------- admin banner ---------- */
+  #adminBanner {
+    display: none; align-items: center; gap: 10px; background: var(--accent-dim); border: 1px solid var(--accent);
+    border-radius: 12px; padding: 11px 14px; margin: 0 14px 4px; cursor: pointer; flex-shrink: 0;
+  }
+  #adminBanner.show { display: flex; }
+  #adminBanner .lock { font-size: 16px; }
+  #adminBanner .txt { flex: 1; font-size: 12.5px; }
+  #adminBanner .txt b { display: block; font-size: 13px; }
+
+  /* ---------- home: widget grid ---------- */
+  .widget-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  .widget {
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px;
+    display: flex; flex-direction: column; gap: 4px; min-height: 88px;
+  }
+  .widget .w-top { display: flex; align-items: center; justify-content: space-between; }
+  .widget .w-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); font-weight: 700; }
+  .widget .w-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .widget .w-dot.on { background: var(--online); }
+  .widget .w-dot.warn { background: var(--busy); }
+  .widget .w-dot.off { background: var(--offline); }
+  .widget .w-dot.bad { background: var(--err); }
+  .widget .w-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+  .widget .w-sub { font-size: 11.5px; color: var(--text-dim); }
+
+  .quick-actions { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 16px; }
+  .quick-actions button {
+    flex-shrink: 0; background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 15px; border-radius: 20px; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .quick-actions button:active { background: var(--bg-hover); }
+  .quick-actions button.busy { color: var(--busy); border-color: var(--busy); }
+
+  /* ---------- finance tab ---------- */
+  .finance-hero { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; margin-bottom: 14px; text-align: center; }
+  .finance-hero .amount { font-size: 32px; font-weight: 800; }
+  .finance-hero .trend { font-size: 13px; margin-top: 4px; }
+  .finance-hero .trend.up { color: var(--err); }
+  .finance-hero .trend.down { color: var(--online); }
+  .finance-hero .sub { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
+
+  .chart-bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+  .chart-bar-label { width: 82px; flex-shrink: 0; font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chart-bar-track { flex: 1; background: var(--bg-input); border-radius: 6px; height: 20px; overflow: hidden; position: relative; }
+  .chart-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #a396ff); border-radius: 6px; transition: width 0.6s cubic-bezier(0.22,1,0.36,1); }
+  .chart-bar-amt { width: 62px; flex-shrink: 0; text-align: right; font-size: 12px; font-weight: 600; }
+
+  .trend-chart { width: 100%; height: 120px; }
+  .trend-chart .bar { opacity: 0.9; transform-box: fill-box; transform-origin: bottom; }
+  .trend-chart .bar-label { fill: var(--text-faint); font-size: 9px; }
+  .trend-chart .bar-amt { fill: var(--text-dim); font-size: 9px; }
+
+  .list-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .list-row:last-child { border-bottom: none; }
+  .list-row .lr-name { font-size: 13px; }
+  .list-row .lr-sub { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
+  .list-row .lr-amt { font-size: 13px; font-weight: 700; }
+
+  .anomaly-card { display: flex; gap: 10px; padding: 11px; background: var(--err-dim); border-radius: 10px; margin-bottom: 8px; }
+  .anomaly-card .a-icon { font-size: 15px; }
+  .anomaly-card .a-text { font-size: 12.5px; line-height: 1.4; color: #f3a8b3; }
+  .anomaly-card .a-time { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
+  .empty-state { text-align: center; color: var(--text-faint); font-size: 13px; padding: 30px 10px; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div class="logo">J</div>
+  <h1>Jarvis Control</h1>
+  <p>Enter your dashboard access token</p>
+  <input id="tokenInput" type="password" placeholder="access token" autocomplete="off">
+  <button onclick="connect()">Connect</button>
+  <div id="gateError"></div>
+</div>
+
+<div id="app" style="display:none;">
+  <header>
+    <div class="title">Jarvis Control</div>
+    <div id="connState"><div class="dot"></div><span id="connLabel">connecting</span></div>
+  </header>
+
+  <div id="adminBanner" onclick="showTab('chats'); openChat('admin');">
+    <div class="lock">&#128274;</div>
+    <div class="txt"><b>Approval needed</b><span id="adminBannerText"></span></div>
+  </div>
+
+  <main>
+    <section id="tab-home" class="tab active">
+      <div class="widget-grid">
+        <div class="widget" id="w-health">
+          <div class="w-top"><span class="w-label">PC Health</span><span class="w-dot off"></span></div>
+          <div class="w-value">--</div>
+          <div class="w-sub">no data yet</div>
+        </div>
+        <div class="widget" id="w-security">
+          <div class="w-top"><span class="w-label">Security</span><span class="w-dot off"></span></div>
+          <div class="w-value">--</div>
+          <div class="w-sub">no data yet</div>
+        </div>
+        <div class="widget" id="w-nas">
+          <div class="w-top"><span class="w-label">NAS</span><span class="w-dot off"></span></div>
+          <div class="w-value">--</div>
+          <div class="w-sub">not configured</div>
+        </div>
+        <div class="widget" id="w-finance" onclick="showTab('finance')" style="cursor:pointer;">
+          <div class="w-top"><span class="w-label">This Month</span><span class="w-dot off"></span></div>
+          <div class="w-value">--</div>
+          <div class="w-sub">no data yet</div>
+        </div>
+      </div>
+
+      <div class="quick-actions">
+        <button onclick="quickAction('check_system_health', this)">Check PC Health</button>
+        <button onclick="quickAction('run_security_check', this)">Run Security Check</button>
+        <button onclick="quickAction('sync_bank_data', this)">Sync Bank Data</button>
+        <button onclick="location.href='/hud'">Open HUD (desk cam)</button>
+      </div>
+
+      <h3 class="section-label">Live Activity</h3>
+      <div id="feed"></div>
+    </section>
+
+    <section id="tab-chats" class="tab">
+      <h3 class="section-label">Bots</h3>
+      <div id="contactList"></div>
+      <h3 class="section-label" style="margin-top:18px;">Team</h3>
+      <div id="employeeContactList"></div>
+
+      <div id="chatDetail">
+        <div class="chat-header">
+          <button class="back" onclick="closeChat()">&larr;</button>
+          <div class="who" onclick="openProfile(currentBotKey)">
+            <div class="who-name" id="chatWhoName"></div>
+            <div class="who-status" id="chatWhoStatus"></div>
+          </div>
+        </div>
+        <div class="chat-body" id="chatBody"></div>
+        <div id="chatInputArea" class="chat-input-row">
+          <input id="chatInput" placeholder="Message..." onkeydown="if(event.key==='Enter')sendChat()">
+          <button onclick="sendChat()">&#8593;</button>
+        </div>
+        <div id="adminArea"></div>
+      </div>
+    </section>
+
+    <section id="tab-finance" class="tab">
+      <div id="financeContent"></div>
+    </section>
+
+    <section id="tab-tools" class="tab">
+      <input id="search" placeholder="Search tools..." oninput="renderTools()">
+      <div id="toolList"></div>
+    </section>
+
+    <section id="tab-org" class="tab">
+      <button class="onboard-btn" onclick="openOnboard()">+ Onboard Agent</button>
+      <div id="orgTree"></div>
+
+      <h3 class="section-label" style="margin-top:6px;">Hire someone</h3>
+      <div class="card hire-form">
+        <select id="hireRole">
+          <option value="developer">Developer</option>
+          <option value="designer">Designer</option>
+          <option value="researcher">Researcher</option>
+          <option value="analyst">Analyst</option>
+        </select>
+        <textarea id="hireJob" rows="2" placeholder="What should they work on?"></textarea>
+        <button class="run-btn" onclick="hire()">Hire</button>
+      </div>
+      <div id="employeeList"></div>
+    </section>
+  </main>
+
+  <nav>
+    <button class="active" data-tab="home" onclick="showTab('home')"><span class="icon">&#127968;</span>Home</button>
+    <button data-tab="chats" onclick="showTab('chats')"><span class="icon">&#128172;</span>Chats</button>
+    <button data-tab="finance" onclick="showTab('finance')"><span class="icon">&#128176;</span>Finance</button>
+    <button data-tab="tools" onclick="showTab('tools')"><span class="icon">&#9881;&#65039;</span>Tools</button>
+    <button data-tab="org" onclick="showTab('org')"><span class="icon">&#128101;</span>Org</button>
+  </nav>
+</div>
+
+<div id="profileModal" onclick="if(event.target===this)closeProfile()">
+  <div class="profile-sheet" id="profileSheet"></div>
+</div>
+
+<div id="onboardModal" onclick="if(event.target===this)closeOnboard()">
+  <div class="onboard-sheet">
+    <h2>Onboard an agent</h2>
+
+    <label>Name</label>
+    <input type="text" id="obName" placeholder="e.g. Backup Watcher">
+
+    <label>What should it do?</label>
+    <div class="kind-toggle">
+      <button type="button" id="obKindTool" class="active" onclick="setOnboardKind('tool')">Run a tool</button>
+      <button type="button" id="obKindRole" onclick="setOnboardKind('role')">Hire a role</button>
+    </div>
+
+    <div id="obToolSection">
+      <label>Tool</label>
+      <input type="text" id="obToolSearch" placeholder="Search tools..." oninput="renderOnboardToolList()">
+      <select id="obTool" size="5" onchange="renderOnboardParams()"></select>
+      <div id="obParams" class="params"></div>
+    </div>
+
+    <div id="obRoleSection" style="display:none;">
+      <label>Role</label>
+      <select id="obRole">
+        <option value="developer">Developer</option>
+        <option value="designer">Designer</option>
+        <option value="researcher">Researcher</option>
+        <option value="analyst">Analyst</option>
+      </select>
+      <label>Job</label>
+      <textarea id="obJob" rows="2" placeholder="What should they work on?"></textarea>
+    </div>
+
+    <label>When should it run?</label>
+    <div class="trigger-choice">
+      <label class="trigger-row"><input type="radio" name="obTrigger" value="manual" checked> Manual only &mdash; I'll trigger it</label>
+      <label class="trigger-row"><input type="radio" name="obTrigger" value="once"> Run once, now</label>
+      <label class="trigger-row"><input type="radio" name="obTrigger" value="interval"> Every <input type="number" id="obMinutes" min="1" value="30"> minutes</label>
+    </div>
+
+    <div class="onboard-error" id="obError"></div>
+    <div class="onboard-actions">
+      <button class="cancel-btn" onclick="closeOnboard()">Cancel</button>
+      <button class="create-btn" onclick="submitOnboard()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Progressive enhancement: the page works fully with plain instant CSS
+     class toggles if either of these fails to load (offline CDN, blocked
+     script, etc) -- every call site below checks window.Motion/window.anime
+     before using them, same fallback pattern as everywhere else in this
+     project (e.g. Ollama as an offline fallback). -->
+<script src="https://cdn.jsdelivr.net/npm/motion@13.2.0/dist/motion.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/animejs@4.5.0/dist/bundles/anime.umd.min.js"></script>
+
+<script>
+let TOKEN = localStorage.getItem('jarvis_dashboard_token') || '';
+let TOOLS = [];
+let BOTS = [];
+let EMPLOYEES = [];
+let AGENTS = [];
+let currentBotKey = null;
+let source = null;
+let chatLog = {};
+
+const AVATAR_STYLE = {
+  jarvis:      {letter: 'J', bg: 'linear-gradient(135deg,#7c6cf0,#4b3fb0)'},
+  cpu_alerts:  {letter: 'C', bg: 'linear-gradient(135deg,#35c471,#1f8a4d)'},
+  improvement: {letter: 'I', bg: 'linear-gradient(135deg,#f2b23c,#c47f10)'},
+  security:    {letter: 'S', bg: 'linear-gradient(135deg,#ef5a6f,#a52f42)'},
+  admin:       {letter: 'A', bg: 'linear-gradient(135deg,#ec4faa,#9c2d74)'},
+};
+
+function loadChatLog() {
+  try { chatLog = JSON.parse(localStorage.getItem('jarvis_chat_log') || '{}'); } catch(e) { chatLog = {}; }
+}
+function saveChatLog() {
+  try { localStorage.setItem('jarvis_chat_log', JSON.stringify(chatLog)); } catch(e) {}
+}
+
+function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'}, opts.headers || {});
+  return fetch(path, opts).then(r => {
+    if (r.status === 401) throw new Error('unauthorized');
+    return r.json();
+  });
+}
+
+/* ---------------- Animation helpers (Motion + anime.js) ----------------
+   Every call site checks window.Motion/window.anime first -- see the CDN
+   <script> tags above the main script block. If either failed to load
+   (offline, blocked), these are no-ops and the page falls back to its
+   plain instant CSS class toggles, same progressive-enhancement pattern
+   as the rest of this project. */
+
+const EASE_OUT = [0.22, 1, 0.36, 1];
+
+function animateIn(el, delay) {
+  if (!window.Motion || !el) return;
+  window.Motion.animate(el, { opacity: [0, 1], y: [8, 0] }, { duration: 0.3, delay: delay || 0, easing: EASE_OUT });
+}
+
+function animateStaggerIn(els) {
+  if (!window.Motion || !els || !els.length) return;
+  window.Motion.animate(els, { opacity: [0, 1], y: [6, 0] }, { duration: 0.28, delay: window.Motion.stagger(0.035), easing: EASE_OUT });
+}
+
+function animateSheetOpen(sheetEl) {
+  if (!window.Motion || !sheetEl) return;
+  window.Motion.animate(sheetEl, { opacity: [0, 1], y: [28, 0] }, { type: 'spring', stiffness: 320, damping: 28 });
+}
+
+// Plays the close animation THEN removes .open (rather than removing it
+// immediately), so the sheet actually slides/fades out instead of vanishing.
+// `after` (if given) always runs, animated or not, so callers can rely on it
+// for cleanup regardless of whether Motion loaded.
+function animateSheetClose(modalEl, sheetEl, after) {
+  if (!window.Motion || !sheetEl) {
+    modalEl.classList.remove('open');
+    if (after) after();
+    return;
+  }
+  const anim = window.Motion.animate(sheetEl, { opacity: [1, 0], y: [0, 28] }, { duration: 0.2, easing: EASE_OUT });
+  anim.finished.then(() => {
+    modalEl.classList.remove('open');
+    if (after) after();
+  });
+}
+
+/* Tiny dependency-free number tween (rAF-based) for the finance hero
+   counter -- kept native rather than betting on anime.js's less-documented
+   plain-object tweening API; anime.js itself is used below for the trend
+   chart's SVG bar draw-in, where its documented targets+stagger API is a
+   confirmed, solid fit. */
+// Lists (contacts, org tree, tools) re-render on every poll (every 5s) even
+// when nothing changed -- re-playing the entrance animation every time would
+// just be distracting flicker, so each one only plays once per page load.
+const _animatedLists = new Set();
+function animateStaggerInOnce(key, els) {
+  if (_animatedLists.has(key)) return;
+  _animatedLists.add(key);
+  animateStaggerIn(els);
+}
+
+function tweenNumber(el, to, opts) {
+  opts = opts || {};
+  const duration = opts.duration || 800;
+  const format = opts.format || (v => Math.round(v).toLocaleString());
+  const start = performance.now();
+  function frame(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic, no library needed
+    el.textContent = (opts.prefix || '') + format(to * eased);
+    if (t < 1) requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+function connect() {
+  const t = document.getElementById('tokenInput').value.trim();
+  if (!t) return;
+  TOKEN = t;
+  api('/api/agents').then(() => {
+    localStorage.setItem('jarvis_dashboard_token', TOKEN);
+    loadChatLog();
+    document.getElementById('gate').classList.add('hidden');
+    document.getElementById('app').style.display = 'flex';
+    refreshAgents();
+    refreshTools();
+    refreshEmployees();
+    refreshRegistry();
+    refreshStatus();
+    refreshFinance();
+    startStream();
+    setInterval(refreshAgents, 5000);
+    setInterval(refreshRegistry, 5000);
+    setInterval(refreshStatus, 15000);
+  }).catch(() => {
+    document.getElementById('gateError').textContent = 'Wrong token, or dashboard unreachable.';
+  });
+}
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  const section = document.getElementById('tab-' + name);
+  section.classList.add('active');
+  document.querySelector(`nav button[data-tab="${name}"]`).classList.add('active');
+  animateIn(section);
+}
+
+/* ---------------- Bots / Chats ---------------- */
+
+function refreshAgents() {
+  api('/api/agents').then(d => {
+    BOTS = d.bots;
+    renderContacts();
+    renderOrgTree();
+    renderAdminArea(d.admin_pending);
+    if (currentBotKey === 'admin') renderAdminArea(d.admin_pending);
+    updateAdminBanner(d.admin_pending);
+  });
+}
+
+function updateAdminBanner(pending) {
+  const banner = document.getElementById('adminBanner');
+  if (pending && currentBotKey !== 'admin') {
+    document.getElementById('adminBannerText').textContent = 'Jarvis wants to ' + pending.description;
+    banner.classList.add('show');
+  } else {
+    banner.classList.remove('show');
+  }
+}
+
+function statusDotClass(bot) {
+  if (!bot.configured) return '';
+  return bot.key === 'admin' ? 'on' : 'on';
+}
+
+function renderContacts() {
+  const list = document.getElementById('contactList');
+  list.innerHTML = '';
+  BOTS.forEach(bot => {
+    const style = AVATAR_STYLE[bot.key] || {letter: bot.name[0], bg: 'var(--accent)'};
+    const el = document.createElement('div');
+    el.className = 'contact';
+    const pendingBadge = (bot.key === 'admin' && window.__adminPending) ? '<div class="badge">1</div>' : '';
+    el.innerHTML = `
+      <div class="avatar" style="background:${style.bg}">${style.letter}<div class="status-dot ${bot.configured ? 'on' : ''}"></div></div>
+      <div class="contact-info">
+        <div class="contact-name">${bot.name}</div>
+        <div class="contact-sub">${bot.configured ? bot.role : 'Not configured'}</div>
+      </div>
+      ${pendingBadge}
+    `;
+    el.onclick = () => openChat(bot.key);
+    list.appendChild(el);
+  });
+  animateStaggerInOnce('contactList', list.children);
+}
+
+function openChat(key) {
+  currentBotKey = key;
+  const bot = BOTS.find(b => b.key === key);
+  document.getElementById('chatWhoName').textContent = bot.name;
+  document.getElementById('chatWhoStatus').textContent = bot.configured ? 'Configured' : 'Not configured';
+  document.getElementById('chatInputArea').style.display = bot.chat ? 'flex' : 'none';
+  document.getElementById('adminArea').innerHTML = '';
+  document.getElementById('chatDetail').classList.add('open');
+  if (bot.chat) {
+    renderChatBody();
+  } else {
+    document.getElementById('chatBody').innerHTML = '';
+    refreshAgents();
+  }
+}
+
+function closeChat() {
+  document.getElementById('chatDetail').classList.remove('open');
+  currentBotKey = null;
+}
+
+function renderChatBody() {
+  const body = document.getElementById('chatBody');
+  const msgs = chatLog[currentBotKey] || [];
+  if (!msgs.length) {
+    body.innerHTML = '<div class="chat-empty">No messages yet. Say hello.</div>';
+    return;
+  }
+  body.innerHTML = msgs.map(m => `<div class="bubble ${m.from}">${escapeHtml(m.text)}</div>`).join('');
+  body.scrollTop = body.scrollHeight;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text || !currentBotKey) return;
+  input.value = '';
+  chatLog[currentBotKey] = chatLog[currentBotKey] || [];
+  chatLog[currentBotKey].push({from: 'user', text, ts: Date.now()});
+  saveChatLog();
+  renderChatBody();
+  api('/api/chat', {method: 'POST', body: JSON.stringify({bot: currentBotKey, message: text})})
+    .catch(() => {
+      chatLog[currentBotKey].push({from: 'bot', text: 'Failed to send.', ts: Date.now()});
+      saveChatLog();
+      renderChatBody();
+    });
+}
+
+function renderAdminArea(pending) {
+  window.__adminPending = pending;
+  if (currentBotKey !== 'admin') { renderContacts(); return; }
+  const area = document.getElementById('adminArea');
+  const body = document.getElementById('chatBody');
+  if (!pending) {
+    body.innerHTML = '<div class="no-pending">No pending approval requests.</div>';
+    area.innerHTML = '';
+    return;
+  }
+  body.innerHTML = '';
+  area.innerHTML = `
+    <div class="approval-card">
+      <div class="lock">&#128274;</div>
+      <p>Jarvis wants to ${escapeHtml(pending.description)}.</p>
+      <div class="approval-actions">
+        <button class="approve-btn" onclick="decideAdmin('${pending.id}', true)">Approve</button>
+        <button class="deny-btn" onclick="decideAdmin('${pending.id}', false)">Deny</button>
+      </div>
+    </div>
+  `;
+}
+
+function decideAdmin(id, approved) {
+  api('/api/admin/decide', {method: 'POST', body: JSON.stringify({id, approved})}).then(() => refreshAgents());
+}
+
+function openProfile(key) {
+  const bot = BOTS.find(b => b.key === key);
+  if (!bot) return;
+  const style = AVATAR_STYLE[key] || {letter: bot.name[0], bg: 'var(--accent)'};
+  document.getElementById('profileSheet').innerHTML = `
+    <div class="avatar" style="background:${style.bg}">${style.letter}</div>
+    <h2>${bot.name}</h2>
+    <div class="role">${bot.role}</div>
+    <div class="stat-row"><span class="stat-label">Status</span><span>${bot.configured ? 'Configured' : 'Not configured'}</span></div>
+    <div class="stat-row"><span class="stat-label">Chat</span><span>${bot.chat ? 'Available' : 'Approval-only'}</span></div>
+    <button class="close" onclick="closeProfile()">Close</button>
+  `;
+  const modal = document.getElementById('profileModal');
+  modal.classList.add('open');
+  animateSheetOpen(modal.querySelector('.profile-sheet'));
+}
+function closeProfile() {
+  const modal = document.getElementById('profileModal');
+  animateSheetClose(modal, modal.querySelector('.profile-sheet'));
+}
+
+/* ---------------- Home: status widgets + quick actions ---------------- */
+
+function setWidget(id, dotClass, value, sub) {
+  const w = document.getElementById(id);
+  w.querySelector('.w-dot').className = 'w-dot ' + dotClass;
+  w.querySelector('.w-value').textContent = value;
+  w.querySelector('.w-sub').textContent = sub;
+}
+
+function refreshStatus() {
+  api('/api/status').then(d => {
+    const h = d.health || {};
+    if (Object.keys(h).length) {
+      setWidget('w-health', h.critical ? 'bad' : 'on', h.thermal_state || 'OK', (h.free_gb != null ? h.free_gb.toFixed(0) + ' GB free' : ''));
+    }
+    const s = d.security || {};
+    if (Object.keys(s).length) {
+      setWidget('w-security', s.critical ? 'bad' : 'on', (s.open_ports != null ? s.open_ports : '--') + ' ports', s.critical ? 'attention needed' : 'nothing flagged');
+    }
+    if (d.nas_configured && d.nas && !d.nas.error) {
+      const vol = (d.nas.volumes || [])[0];
+      setWidget('w-nas', 'on', vol ? vol.used_pct.toFixed(0) + '% used' : 'online', `CPU ${Math.round(d.nas.cpu_pct)}% · RAM ${Math.round(d.nas.mem_used_pct)}%`);
+    } else if (d.nas_configured) {
+      setWidget('w-nas', 'bad', 'error', 'unreachable');
+    }
+    if (d.finance) {
+      const chg = d.finance.change_pct;
+      const trendTxt = chg == null ? '' : (chg >= 0 ? '+' : '') + chg.toFixed(0) + '% vs last month';
+      setWidget('w-finance', 'on', '$' + Math.round(d.finance.total_spent).toLocaleString(), trendTxt);
+    }
+  });
+}
+
+function quickAction(tool, btn) {
+  btn.classList.add('busy');
+  const original = btn.textContent;
+  btn.textContent = 'Running...';
+  api('/api/run', {method: 'POST', body: JSON.stringify({tool, args: {}})}).finally(() => {
+    setTimeout(() => { btn.classList.remove('busy'); btn.textContent = original; }, 1500);
+  });
+}
+
+/* ---------------- Finance tab ---------------- */
+
+function refreshFinance() {
+  api('/api/finance').then(renderFinance);
+}
+
+function renderFinance(d) {
+  const el = document.getElementById('financeContent');
+  if (!d.available) {
+    el.innerHTML = '<div class="empty-state">No spending data synced yet.<br>Use the Sync Bank Data quick action on Home, or drop statements in JarvisStatements / the NAS Bank Statements folder.</div>';
+    return;
+  }
+  const s = d.summary;
+  const chg = s.change_pct;
+  const trendClass = chg == null ? '' : (chg >= 0 ? 'up' : 'down');
+  const trendTxt = chg == null ? 'no prior-period data' : `${chg >= 0 ? '+' : ''}${chg.toFixed(0)}% vs last month`;
+
+  let html = `
+    <div class="finance-hero">
+      <div class="amount" id="financeAmount">$0</div>
+      <div class="trend ${trendClass}">${trendTxt}</div>
+      <div class="sub">last 30 days</div>
+    </div>
+  `;
+
+  if (s.by_category.length) {
+    const maxCat = Math.max(...s.by_category.map(c => c.amount));
+    html += `<h3 class="section-label">By Category</h3><div class="card">`;
+    s.by_category.forEach(c => {
+      html += `
+        <div class="chart-bar-row">
+          <div class="chart-bar-label">${c.name}</div>
+          <div class="chart-bar-track"><div class="chart-bar-fill" data-target-pct="${(c.amount / maxCat * 100).toFixed(0)}" style="width:0%"></div></div>
+          <div class="chart-bar-amt">$${Math.round(c.amount)}</div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+  }
+
+  if (s.monthly_trend.length > 1) {
+    html += `<h3 class="section-label">Monthly Trend</h3><div class="card">${buildTrendChart(s.monthly_trend)}</div>`;
+  }
+
+  if (d.recurring.length) {
+    html += `<h3 class="section-label">Recurring Charges</h3><div class="card">`;
+    d.recurring.forEach(r => {
+      html += `<div class="list-row"><div><div class="lr-name">${r.name}</div><div class="lr-sub">seen ${r.count}x</div></div><div class="lr-amt">$${r.amount.toFixed(2)}</div></div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (s.top_merchants.length) {
+    html += `<h3 class="section-label">Top Merchants</h3><div class="card">`;
+    s.top_merchants.forEach(m => {
+      html += `<div class="list-row"><div class="lr-name">${m.name}</div><div class="lr-amt">$${Math.round(m.amount)}</div></div>`;
+    });
+    html += `</div>`;
+  }
+
+  html += `<h3 class="section-label">Recent Anomalies</h3>`;
+  if (d.anomalies.length) {
+    d.anomalies.slice().reverse().forEach(a => {
+      html += `<div class="anomaly-card"><div class="a-icon">&#9888;&#65039;</div><div><div class="a-text">${a.detail}</div><div class="a-time">${new Date(a.ts * 1000).toLocaleDateString()}</div></div></div>`;
+    });
+  } else {
+    html += `<div class="empty-state">Nothing flagged yet.</div>`;
+  }
+
+  el.innerHTML = html;
+
+  tweenNumber(document.getElementById('financeAmount'), Math.round(s.total_spent), { prefix: '$' });
+
+  // Plain CSS transition (see .chart-bar-fill's `transition` rule) rather
+  // than anime.js here -- a linear per-element width target doesn't need a
+  // library, and this sidesteps betting on anime v4's per-target dynamic
+  // value callback shape, which isn't confidently verified. requestAnimation
+  // Frame delay so the browser paints width:0 first before the transition
+  // to the real width starts (setting both in the same tick wouldn't
+  // transition at all).
+  requestAnimationFrame(() => {
+    el.querySelectorAll('.chart-bar-fill').forEach((f, i) => {
+      setTimeout(() => { f.style.width = f.dataset.targetPct + '%'; }, i * 40);
+    });
+  });
+
+  const bars = el.querySelectorAll('.trend-chart .bar');
+  if (window.anime && bars.length) {
+    anime.animate(bars, { scaleY: [0, 1], duration: 650, delay: anime.stagger(60), ease: 'outExpo' });
+  }
+}
+
+function buildTrendChart(trend) {
+  const w = 300, h = 110, pad = 20;
+  const max = Math.max(...trend.map(t => t.amount), 1);
+  const barW = (w - pad) / trend.length - 8;
+  let bars = '';
+  trend.forEach((t, i) => {
+    const bh = (t.amount / max) * (h - 30);
+    const x = pad + i * ((w - pad) / trend.length);
+    const y = h - 20 - bh;
+    // scaleY (grown from anime.js, transform-origin:bottom -- see CSS) needs
+    // the bar's own bounding box as the transform reference, not the SVG
+    // viewport, hence the .bar rule's transform-box:fill-box.
+    bars += `<rect class="bar" x="${x}" y="${y}" width="${barW}" height="${bh}" rx="3" fill="url(#trendBarGradient)"></rect>`;
+    bars += `<text class="bar-label" x="${x + barW / 2}" y="${h - 6}" text-anchor="middle">${t.month.slice(5)}</text>`;
+    bars += `<text class="bar-amt" x="${x + barW / 2}" y="${y - 4}" text-anchor="middle">$${Math.round(t.amount / 1000)}k</text>`;
+  });
+  // Gradient-filled, rounded-cap bars -- Bklit UI's chart visual language,
+  // ported as plain SVG (its own components are React/shadcn; this page is
+  // vanilla, so the technique is borrowed rather than the component).
+  const defs = `<defs><linearGradient id="trendBarGradient" x1="0" y1="1" x2="0" y2="0">
+    <stop offset="0%" stop-color="var(--accent)"></stop>
+    <stop offset="100%" stop-color="#a396ff"></stop>
+  </linearGradient></defs>`;
+  return `<svg class="trend-chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${defs}${bars}</svg>`;
+}
+
+/* ---------------- Employees / Team ---------------- */
+
+function employeeAvatarColor(role) {
+  return {developer: '#7c6cf0', designer: '#35c471', researcher: '#f2b23c', analyst: '#ef5a6f'}[role] || '#5b5f6b';
+}
+
+function renderEmployeeContacts() {
+  const list = document.getElementById('employeeContactList');
+  if (!EMPLOYEES.length) { list.innerHTML = '<div class="contact-sub" style="padding:4px 8px;">No one hired yet.</div>'; return; }
+  list.innerHTML = '';
+  EMPLOYEES.slice().reverse().slice(0, 6).forEach(j => {
+    const el = document.createElement('div');
+    el.className = 'contact';
+    el.innerHTML = `
+      <div class="avatar" style="background:${employeeAvatarColor(j.role)}">${j.name[0]}<div class="status-dot ${j.status === 'running' ? 'busy' : (j.status === 'done' ? 'on' : '')}"></div></div>
+      <div class="contact-info">
+        <div class="contact-name">${j.name}</div>
+        <div class="contact-sub">${j.job}</div>
+      </div>
+      <span class="status-pill ${j.status}">${j.status}</span>
+    `;
+    list.appendChild(el);
+  });
+}
+
+function hire() {
+  const role = document.getElementById('hireRole').value;
+  const job = document.getElementById('hireJob').value.trim();
+  if (!job) return;
+  api('/api/hire', {method: 'POST', body: JSON.stringify({role, job})}).then(() => {
+    document.getElementById('hireJob').value = '';
+    refreshEmployees();
+  });
+}
+
+function refreshEmployees() {
+  api('/api/employees').then(jobs => {
+    EMPLOYEES = jobs;
+    renderEmployeeContacts();
+    renderOrgTree();
+    const list = document.getElementById('employeeList');
+    list.innerHTML = '';
+    jobs.slice().reverse().forEach(j => {
+      const el = document.createElement('div');
+      el.className = 'card';
+      el.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span class="name">${j.name} <span style="color:var(--text-faint); font-weight:400;">(${j.role}${j.auto ? ', self-hired' : ''})</span></span>
+          <span class="status-pill ${j.status}">${j.status}</span>
+        </div>
+        <div class="desc">${j.job}</div>
+        ${j.result ? `<div class="result-box ${j.status === 'failed' ? 'err' : 'ok'}">${escapeHtml(j.result)}</div>` : ''}
+      `;
+      list.appendChild(el);
+    });
+  });
+}
+
+/* ---------------- Org tree ---------------- */
+
+const _AGENT_KIND_LABEL = {developer: 'Dev', designer: 'Design', researcher: 'Research', analyst: 'Finance'};
+
+function refreshRegistry() {
+  api('/api/registry').then(d => { AGENTS = d; renderOrgTree(); });
+}
+
+function toggleTreeSection(el) {
+  el.classList.toggle('collapsed');
+  el.nextElementSibling.classList.toggle('collapsed');
+}
+
+function treeSectionHtml(id, label, count, rowsHtml) {
+  return `
+    <div class="tree-section">
+      <div class="tree-header" onclick="toggleTreeSection(this)"><span class="chevron">&#9662;</span>${label} <span class="count">(${count})</span></div>
+      <div class="tree-list" id="${id}">${rowsHtml || '<div class="tree-empty">Nothing here yet.</div>'}</div>
+    </div>
+  `;
+}
+
+function agentStatusText(a) {
+  if (!a.enabled) return 'disabled';
+  if (a.trigger.type === 'manual') return 'manual only';
+  if (a.trigger.type === 'once') return a.last_run_at ? 'ran once' : 'runs once, pending';
+  const mins = Math.round((a.next_run_at - Date.now() / 1000) / 60);
+  return mins > 0 ? `next run in ${mins}m` : 'running soon';
+}
+
+function agentIsRunning(a) {
+  return EMPLOYEES.some(j => j.agent_id === a.id && j.status === 'running');
+}
+
+function agentDotClass(a) {
+  if (agentIsRunning(a)) return 'busy';
+  if (!a.enabled && a.trigger.type !== 'once') return '';
+  if (a.last_status === 'failed') return 'bad';
+  if (a.last_status === 'ok') return 'on';
+  return '';
+}
+
+function renderOrgTree() {
+  const botsHtml = BOTS.map(bot => `
+    <div class="tree-row" onclick="openProfile('${bot.key}')">
+      <div class="tree-dot ${bot.configured ? 'on' : ''}"></div>
+      <div class="tree-info"><div class="tree-name">${bot.name}</div><div class="tree-sub">${bot.configured ? bot.role : 'Not configured'}</div></div>
+    </div>
+  `).join('');
+
+  const agentsHtml = AGENTS.map(a => `
+    <div class="tree-row" onclick="openAgentDetail('${a.id}')">
+      <div class="tree-dot ${agentDotClass(a)}"></div>
+      <div class="tree-info"><div class="tree-name">${escapeHtml(a.name)}</div><div class="tree-sub">${agentStatusText(a)}</div></div>
+    </div>
+  `).join('');
+
+  const teamHtml = EMPLOYEES.slice().reverse().slice(0, 8).map(j => `
+    <div class="tree-row">
+      <div class="tree-dot ${j.status === 'running' ? 'busy' : (j.status === 'done' ? 'on' : (j.status === 'failed' ? 'bad' : ''))}"></div>
+      <div class="tree-info"><div class="tree-name">${j.name}</div><div class="tree-sub">${escapeHtml(j.job || '')}</div></div>
+    </div>
+  `).join('');
+
+  const tree = document.getElementById('orgTree');
+  tree.innerHTML =
+    treeSectionHtml('treeBots', 'Bots', BOTS.length, botsHtml) +
+    treeSectionHtml('treeAgents', 'Agents', AGENTS.length, agentsHtml) +
+    treeSectionHtml('treeTeam', 'Team', EMPLOYEES.length, teamHtml);
+  animateStaggerInOnce('orgTree', tree.querySelectorAll('.tree-row'));
+}
+
+function openAgentDetail(id) {
+  const a = AGENTS.find(x => x.id === id);
+  if (!a) return;
+  const kindLabel = a.kind === 'tool' ? `Runs <b>${a.tool}</b>` : `Hires a <b>${_AGENT_KIND_LABEL[a.role] || a.role}</b>`;
+  const triggerLabel = a.trigger.type === 'manual' ? 'Manual only'
+    : a.trigger.type === 'once' ? 'Run once' : `Every ${a.trigger.minutes} minute(s)`;
+  document.getElementById('profileSheet').innerHTML = `
+    <h2>${escapeHtml(a.name)}</h2>
+    <div class="role">${kindLabel}</div>
+    <div class="stat-row"><span class="stat-label">Schedule</span><span>${triggerLabel}</span></div>
+    <div class="stat-row"><span class="stat-label">Status</span><span>${a.enabled ? 'Enabled' : 'Disabled'}</span></div>
+    <div class="stat-row"><span class="stat-label">Last run</span><span>${a.last_run_at ? new Date(a.last_run_at * 1000).toLocaleString() : 'never'}</span></div>
+    ${a.last_summary ? `<div class="result-box ${a.last_status === 'failed' ? 'err' : 'ok'}" style="text-align:left;">${escapeHtml(a.last_summary)}</div>` : ''}
+    <div class="onboard-actions" style="margin-top:16px;">
+      <button class="cancel-btn" onclick="toggleAgent('${a.id}', ${!a.enabled})">${a.enabled ? 'Disable' : 'Enable'}</button>
+      <button class="create-btn" onclick="runAgentNow('${a.id}')">Run now</button>
+    </div>
+    <button class="close" style="color:var(--err); margin-top:8px;" onclick="deleteAgentConfirm('${a.id}')">Delete</button>
+    <button class="close" onclick="closeProfile()">Close</button>
+  `;
+  const modal = document.getElementById('profileModal');
+  modal.classList.add('open');
+  animateSheetOpen(modal.querySelector('.profile-sheet'));
+}
+
+function runAgentNow(id) {
+  api(`/api/registry/${id}/run`, {method: 'POST'}).then(() => { refreshRegistry(); refreshEmployees(); });
+}
+
+function toggleAgent(id, enabled) {
+  api(`/api/registry/${id}/toggle`, {method: 'POST', body: JSON.stringify({enabled})}).then(() => { refreshRegistry(); closeProfile(); });
+}
+
+function deleteAgentConfirm(id) {
+  api(`/api/registry/${id}`, {method: 'DELETE'}).then(() => { refreshRegistry(); closeProfile(); });
+}
+
+/* ---------------- Onboarding ---------------- */
+
+let _obKind = 'tool';
+
+function openOnboard() {
+  document.getElementById('obName').value = '';
+  document.getElementById('obToolSearch').value = '';
+  document.getElementById('obJob').value = '';
+  document.getElementById('obMinutes').value = 30;
+  document.getElementById('obError').textContent = '';
+  document.querySelector('input[name="obTrigger"][value="manual"]').checked = true;
+  setOnboardKind('tool');
+  renderOnboardToolList();
+  const modal = document.getElementById('onboardModal');
+  modal.classList.add('open');
+  animateSheetOpen(modal.querySelector('.onboard-sheet'));
+}
+
+function closeOnboard() {
+  const modal = document.getElementById('onboardModal');
+  animateSheetClose(modal, modal.querySelector('.onboard-sheet'));
+}
+
+function setOnboardKind(kind) {
+  _obKind = kind;
+  document.getElementById('obKindTool').classList.toggle('active', kind === 'tool');
+  document.getElementById('obKindRole').classList.toggle('active', kind === 'role');
+  document.getElementById('obToolSection').style.display = kind === 'tool' ? '' : 'none';
+  document.getElementById('obRoleSection').style.display = kind === 'role' ? '' : 'none';
+}
+
+function renderOnboardToolList() {
+  const q = document.getElementById('obToolSearch').value.toLowerCase();
+  const sel = document.getElementById('obTool');
+  const prev = sel.value;
+  sel.innerHTML = TOOLS.filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q))
+    .map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  renderOnboardParams();
+}
+
+function renderOnboardParams() {
+  const t = TOOLS.find(x => x.name === document.getElementById('obTool').value);
+  document.getElementById('obParams').innerHTML = t ? paramsFormHtml(t) : '';
+}
+
+function submitOnboard() {
+  const name = document.getElementById('obName').value.trim();
+  const errEl = document.getElementById('obError');
+  if (!name) { errEl.textContent = 'Name is required.'; return; }
+
+  const triggerType = document.querySelector('input[name="obTrigger"]:checked').value;
+  const trigger = triggerType === 'interval'
+    ? {type: 'interval', minutes: Number(document.getElementById('obMinutes').value) || 30}
+    : {type: triggerType};
+
+  const body = {name, kind: _obKind, trigger};
+  if (_obKind === 'tool') {
+    const toolName = document.getElementById('obTool').value;
+    if (!toolName) { errEl.textContent = 'Pick a tool.'; return; }
+    const args = {};
+    document.querySelectorAll('#obParams [data-param]').forEach(inp => {
+      if (inp.value.trim() !== '') args[inp.dataset.param] = inp.value;
+    });
+    body.tool = toolName;
+    body.args = args;
+  } else {
+    body.role = document.getElementById('obRole').value;
+    body.job = document.getElementById('obJob').value.trim();
+    if (!body.job) { errEl.textContent = 'Describe the job.'; return; }
+  }
+
+  api('/api/registry', {method: 'POST', body: JSON.stringify(body)}).then(res => {
+    if (res.error) { errEl.textContent = res.error; return; }
+    closeOnboard();
+    refreshRegistry();
+  });
+}
+
+/* ---------------- Tools ---------------- */
+
+function refreshTools() {
+  api('/api/tools').then(t => { TOOLS = t; renderTools(); });
+}
+
+function paramsFormHtml(t) {
+  return t.params.filter(p => p.name !== 'self').map(p =>
+    `<div><div class="param-label">${p.name}${p.required ? ' (required)' : ''}</div>
+     <input data-param="${p.name}" placeholder="${p.default === null ? '' : p.default}"></div>`
+  ).join('');
+}
+
+function renderTools() {
+  const q = document.getElementById('search').value.toLowerCase();
+  const list = document.getElementById('toolList');
+  list.innerHTML = '';
+  TOOLS.filter(t => t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q)).forEach(t => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    const paramsHtml = paramsFormHtml(t);
+    el.innerHTML = `
+      <div class="name">${t.name}</div>
+      <div class="desc">${t.description}</div>
+      <div class="params">${paramsHtml}</div>
+      <button class="run-btn">Run</button>
+      <div class="result-slot"></div>
+    `;
+    el.querySelector('.run-btn').onclick = () => runTool(t, el);
+    list.appendChild(el);
+  });
+  // Guarded so re-filtering via the search box (renderTools() re-runs on
+  // every keystroke) never re-triggers this -- only the very first
+  // population from refreshTools() plays it.
+  animateStaggerInOnce('toolList', list.children);
+}
+
+function runTool(t, el) {
+  const args = {};
+  el.querySelectorAll('[data-param]').forEach(inp => {
+    if (inp.value.trim() !== '') args[inp.dataset.param] = inp.value;
+  });
+  const slot = el.querySelector('.result-slot');
+  slot.innerHTML = '<div class="result-box pending">Running...</div>';
+  api('/api/run', {method: 'POST', body: JSON.stringify({tool: t.name, args})})
+    .then(res => { slot.dataset.runId = res.id; })
+    .catch(e => { slot.innerHTML = `<div class="result-box err">${e.message}</div>`; });
+}
+
+/* ---------------- Activity feed / SSE ---------------- */
+
+function startStream() {
+  if (source) source.close();
+  source = new EventSource('/api/stream?token=' + encodeURIComponent(TOKEN));
+  source.onopen = () => setConn(true);
+  source.onerror = () => setConn(false);
+  source.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    addFeedEntry(event);
+    handleEvent(event);
+  };
+}
+
+function setConn(live) {
+  document.querySelector('#connState .dot').classList.toggle('live', live);
+  document.getElementById('connLabel').textContent = live ? 'live' : 'reconnecting';
+}
+
+const _STATUS_REFRESH_TOOLS = new Set(['check_system_health', 'run_security_check', 'sync_bank_data', 'get_spending_summary']);
+
+function handleEvent(event) {
+  if (event.type === 'tool_run_finished') {
+    applyToolResult(event.payload);
+    if (_STATUS_REFRESH_TOOLS.has(event.payload.tool)) {
+      refreshStatus();
+      refreshFinance();
+    }
+  }
+  if (event.type === 'employee_queued' || event.type === 'employee_updated') refreshEmployees();
+  if (event.type === 'agent_created' || event.type === 'agent_updated' || event.type === 'agent_deleted') refreshRegistry();
+  if (event.type === 'finance_anomaly') refreshFinance();
+  if (event.type === 'health_critical' || event.type === 'security_critical') refreshStatus();
+  if (event.type === 'chat_message' || event.type === 'chat_reply') {
+    const bot = event.payload.bot;
+    chatLog[bot] = chatLog[bot] || [];
+    // chat_message from this browser was already appended locally; only
+    // append chat_reply here (and chat_message from some OTHER session/tab).
+    if (event.type === 'chat_reply') {
+      chatLog[bot].push({from: 'bot', text: event.payload.text, ts: Date.now()});
+      saveChatLog();
+      if (currentBotKey === bot) renderChatBody();
+      renderContacts();
+    }
+  }
+}
+
+function applyToolResult(payload) {
+  document.querySelectorAll('.result-slot').forEach(slot => {
+    if (slot.dataset.runId === payload.id) {
+      slot.innerHTML = `<div class="result-box ${payload.ok ? 'ok' : 'err'}">${escapeHtml(payload.result)}</div>`;
+    }
+  });
+}
+
+// Manus.ai-style readable trace: a real sentence per known event type
+// instead of a raw JSON dump, so the Live Activity feed reads like "watch
+// the agent work" rather than a debug log. Falls back to the old JSON dump
+// for any event type not explicitly mapped, so nothing ever renders blank.
+function describeEvent(event) {
+  const p = event.payload || {};
+  const argsStr = p.args && Object.keys(p.args).length
+    ? '(' + Object.entries(p.args).map(([k, v]) => `${k}=${v}`).join(', ') + ')' : '';
+  const trunc = (s, n) => (s || '').length > n ? s.slice(0, n) + '…' : (s || '');
+  switch (event.type) {
+    case 'tool_run_started': return `Running ${p.tool}${argsStr}…`;
+    case 'tool_run_finished': return `${p.ok ? '✓' : '✗'} ${p.tool} ${p.ok ? 'finished' : 'failed'}${p.result ? ' — ' + trunc(p.result, 140) : ''}`;
+    case 'employee_queued': return `${p.name} queued: ${trunc(p.job || p.tool || '', 140)}`;
+    case 'employee_updated': return `${p.name} ${p.status}${p.result ? ' — ' + trunc(p.result, 140) : ''}`;
+    case 'agent_created': return `Onboarded agent "${p.name}"`;
+    case 'agent_updated': return `Agent "${p.name}" ${p.last_status || 'updated'}${p.last_summary ? ' — ' + trunc(p.last_summary, 140) : ''}`;
+    case 'agent_deleted': return `Agent removed`;
+    case 'chat_message': return `You → ${p.bot}: ${trunc(p.text, 140)}`;
+    case 'chat_reply': return `${p.bot} → You: ${trunc(p.text, 140)}`;
+    case 'security_critical': return `⚠️ Security: ${trunc(p.result, 160)}`;
+    case 'health_critical': return `⚠️ Health: ${trunc(p.result, 160) || 'critical'}`;
+    case 'finance_anomaly': return `💰 Spending anomaly: ${trunc(p.detail || JSON.stringify(p), 140)}`;
+    default: return JSON.stringify(p).slice(0, 220);
+  }
+}
+
+function addFeedEntry(event) {
+  const feed = document.getElementById('feed');
+  const el = document.createElement('div');
+  el.className = 'feed-entry';
+  const time = new Date(event.ts * 1000).toLocaleTimeString();
+  el.innerHTML = `<div class="fe-top"><span class="fe-type">${event.type}</span><span class="fe-time">${time}</span></div>
+    <div class="fe-payload">${escapeHtml(describeEvent(event))}</div>`;
+  feed.insertBefore(el, feed.firstChild);
+  while (feed.children.length > 150) feed.removeChild(feed.lastChild);
+  animateIn(el);
+}
+
+if (TOKEN) {
+  document.getElementById('tokenInput').value = TOKEN;
+  connect();
+}
+</script>
+</body>
+</html>
