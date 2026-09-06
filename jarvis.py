@@ -1045,10 +1045,20 @@ def _security_watcher_thread():
     ~/.jarvis/security_log.jsonl every time.
 
     The JarSecurity sub-agent (jarvis_security.py) rides along on the same
-    cycle: it gets a summary after every sweep, and a critical finding (a
-    suspicious process or a brand-new LAN device) triggers an immediate
-    Telegram alert from it, same as the voice/SMS/main-Telegram alert
-    below."""
+    cycle: it gets a quiet summary after every sweep regardless, and a
+    critical finding (a suspicious process, a newly-exposed port, a new LAN
+    device, or a newly-flagged dependency) triggers an immediate loud alert
+    (voice/SMS/main-Telegram/JarSecurity/admin-consult).
+
+    _last_signature dedupes that loud alert the same way
+    _ai_services_watcher_thread's _alerted set dedupes restart alerts: a
+    long-lived, unchanged critical condition (e.g. a port that's been
+    sitting exposed for days) only fires the loud path once, not every
+    single 4-hour cycle -- re-alerting only when the actual set of
+    suspicious processes/exposed ports/flags changes, or after it clears
+    and a new issue appears. The quiet per-sweep JarSecurity summary still
+    reports the live state every time either way, so nothing is hidden."""
+    _last_signature = None
     while not pipeline_stop.is_set():
         try:
             result = tools.run_security_check()
@@ -1058,13 +1068,26 @@ def _security_watcher_thread():
             result = ""
         critical = tools.LAST_SECURITY_RESULT.get("critical", False)
         if critical:
-            text = f"Security sweep sir: {result}"
-            with _command_lock:
-                speak(text)
-            _notify_all(text)
-            jarvis_security.send_alert(result)
-            bot_events.publish("security_critical", {"result": result})
-            _consult_admin_on_new_devices()
+            signature = (
+                tuple(sorted(tools.LAST_SECURITY_RESULT.get("suspicious") or [])),
+                tuple(sorted(
+                    p.get("addr", "") for p in (tools.LAST_SECURITY_RESULT.get("ports") or [])
+                    if p.get("scope") == "exposed"
+                )),
+                bool(tools.LAST_SECURITY_RESULT.get("new_devices")),
+                bool(tools.LAST_SECURITY_RESULT.get("dependency_flagged")),
+            )
+            if signature != _last_signature:
+                _last_signature = signature
+                text = f"Security sweep sir: {result}"
+                with _command_lock:
+                    speak(text)
+                _notify_all(text)
+                jarvis_security.send_alert(result)
+                bot_events.publish("security_critical", {"result": result})
+                _consult_admin_on_new_devices()
+        else:
+            _last_signature = None
         if result:
             jarvis_security.send_summary(result)
         if pipeline_stop.wait(_SECURITY_CHECK_INTERVAL_SECONDS):
