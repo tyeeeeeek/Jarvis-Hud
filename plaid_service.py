@@ -318,6 +318,39 @@ def _homelab_health():
     return jsonify(tools.LAST_HEALTH_RESULT or {})
 
 
+@app.route("/homelab/ai_services")
+def _homelab_ai_services():
+    """Read-only: Ollama/Prometheus status from the last periodic
+    check_ai_services() run (the watcher thread that runs every 10 minutes
+    in jarvis.py), same "never a fresh check from this route" pattern as
+    _homelab_health above."""
+    import tools
+    return jsonify(tools.LAST_AI_SERVICES_RESULT or {})
+
+
+@app.route("/homelab/ai_services/check", methods=["POST"])
+def _homelab_ai_services_check():
+    """On-demand, live re-check (unlike the GET route above) -- same
+    "manual button triggers a real call" pattern as /homelab/network/scan
+    and /homelab/speedtest/run."""
+    import tools
+    tools.check_ai_services()
+    return jsonify(tools.LAST_AI_SERVICES_RESULT or {})
+
+
+@app.route("/homelab/ai_services/restart", methods=["POST"])
+def _homelab_ai_services_restart():
+    """Manual restart button for one down service. `service` must be
+    exactly "ollama" or "prometheus" in the request body -- tools.
+    restart_ai_service() itself refuses anything else, so there's no way
+    for this route to become a general restart-anything endpoint."""
+    import tools
+    service = (request.get_json(silent=True) or {}).get("service", "")
+    result = tools.restart_ai_service(service)
+    tools.check_ai_services()
+    return jsonify({"result": result, "services": tools.LAST_AI_SERVICES_RESULT or {}})
+
+
 def start_server():
     statements_service.ensure_statements_dir()
 

@@ -1991,6 +1991,127 @@ def log_deep_scan_result() -> dict:
     return {"critical": critical, "summary": summary}
 
 
+# ================================================================ LOCAL AI/MONITORING SERVICES WATCHDOG (Ollama, Prometheus)
+# Detects whether the two local services this project's own AI/monitoring
+# stack depends on -- Ollama (the local-fallback chat/vision/passive-memory
+# model host, see OLLAMA_URL above) and Prometheus (homelab metrics
+# scraping) -- are actually up, and restarts them if not. Deliberately
+# narrow, same philosophy as the rest of this file (see module docstring):
+# _AI_SERVICES below is a fixed dict, so only these two exact named
+# services are ever restartable, never an arbitrary systemctl/docker unit.
+# restart_ai_service() tries, in order: an already-running Docker container
+# of that name (docker restart -- no root needed if this user is in the
+# docker group), then a systemd unit (`systemctl --user` first, then
+# non-interactive sudo via the same _sudo_n() helper run_rootkit_scan/
+# run_security_audit use -- fails fast with a clear message rather than
+# ever hanging on a password prompt, and needs the same kind of scoped
+# NOPASSWD rule documented in the README's Homelab section if the unit is
+# system-level).
+_AI_SERVICES = {
+    "ollama": {"label": "Ollama", "url": "http://localhost:11434/api/tags",
+               "unit": "ollama.service", "container": "ollama"},
+    "prometheus": {"label": "Prometheus", "url": "http://localhost:9090/-/healthy",
+                   "unit": "prometheus.service", "container": "prometheus"},
+}
+
+# Cheap read of the most recent check_ai_services() call -- same pattern as
+# LAST_HEALTH_RESULT/LAST_SECURITY_RESULT above, lets plaid_service.py's
+# Homelab widget route and agent_status() show the last known state without
+# triggering a fresh network round-trip on every page load.
+LAST_AI_SERVICES_RESULT = {}
+
+
+def _ai_service_up(entry) -> bool:
+    """One fast, lightweight HTTP GET against a service's own health
+    endpoint -- never more than a few seconds, so this is cheap enough to
+    call on every watchdog cycle and every dashboard refresh."""
+    try:
+        r = requests.get(entry["url"], timeout=4)
+        return r.status_code < 500
+    except requests.RequestException:
+        return False
+
+
+def check_ai_services() -> str:
+    """Read-only health check of the two local AI/monitoring services this
+    project relies on -- Ollama (local-fallback chat/vision/passive-memory
+    model host) and Prometheus (homelab metrics) -- by hitting each one's
+    own lightweight HTTP health endpoint. Never restarts anything itself;
+    use restart_ai_service for that. Use this for "is Ollama up"/"is
+    Prometheus down"/"check my monitoring services" requests -- it's also
+    what the background watchdog thread and the Homelab HUD widget call to
+    decide whether a service needs restarting."""
+    global LAST_AI_SERVICES_RESULT
+    statuses = {key: {"label": entry["label"], "up": _ai_service_up(entry)}
+                for key, entry in _AI_SERVICES.items()}
+    LAST_AI_SERVICES_RESULT = statuses
+    down = [s["label"] for s in statuses.values() if not s["up"]]
+    if not down:
+        return "Ollama and Prometheus are both up sir."
+    return f"{' and '.join(down)} {'is' if len(down) == 1 else 'are'} down sir."
+
+
+def restart_ai_service(service: str) -> str:
+    """Restart ONE down local service. `service` must be exactly "ollama"
+    or "prometheus" -- nothing else is accepted (see _AI_SERVICES above;
+    this can never become an arbitrary systemctl/docker target). Tries a
+    running Docker container of that name first, then a systemd unit
+    (user-level, then system-level via non-interactive sudo -- same
+    fails-fast pattern this file's other root-needing diagnostics use).
+    Use this when check_ai_services (or the background watchdog) reports
+    one of these two as down and it needs to be brought back up."""
+    key = (service or "").strip().lower()
+    entry = _AI_SERVICES.get(key)
+    if not entry:
+        return f"'{service}' isn't a service I can restart sir -- only: {', '.join(_AI_SERVICES)}."
+
+    def _post_restart_note(verb):
+        time.sleep(2)
+        ok = _ai_service_up(entry)
+        return f"{verb} {entry['label']} sir -- {'back up' if ok else 'still not answering yet, give it a moment'}."
+
+    docker = shutil.which("docker")
+    if docker:
+        try:
+            names = subprocess.run([docker, "ps", "-a", "--format", "{{.Names}}"],
+                                    capture_output=True, text=True, timeout=10).stdout.splitlines()
+        except Exception:
+            names = []
+        if entry["container"] in names:
+            try:
+                r = subprocess.run([docker, "restart", entry["container"]],
+                                    capture_output=True, text=True, timeout=30)
+            except Exception as e:
+                return f"Docker restart of {entry['label']} failed sir: {e}"
+            if r.returncode != 0:
+                return f"Docker restart of {entry['label']} failed sir: {(r.stderr or r.stdout).strip()}"
+            return _post_restart_note("Restarted (Docker container)")
+
+    if IS_WINDOWS:
+        return (f"I don't have a way to restart {entry['label']} on Windows sir -- "
+                "it isn't running as a Docker container here, and there's no systemd on this OS.")
+
+    if not shutil.which("systemctl"):
+        return f"I couldn't find Docker or systemctl on this machine sir -- can't restart {entry['label']}."
+
+    try:
+        r = subprocess.run(["systemctl", "--user", "restart", entry["unit"]],
+                            capture_output=True, text=True, timeout=20)
+    except Exception as e:
+        return f"I couldn't restart {entry['label']} sir: {e}"
+    if r.returncode == 0:
+        return _post_restart_note("Restarted (user service)")
+
+    r2, needs_password = _sudo_n(["systemctl", "restart", entry["unit"]], 20)
+    if needs_password or r2 is None:
+        return (f"{entry['label']} isn't running as a user service, and passwordless sudo for "
+                "systemctl isn't set up sir -- see the README's Homelab section for the NOPASSWD "
+                "rule, or ask me to run_admin_action the sudo restart once.")
+    if r2.returncode != 0:
+        return f"I couldn't restart {entry['label']} sir: {(r2.stderr or r2.stdout).strip()}"
+    return _post_restart_note("Restarted")
+
+
 # ================================================================ SECURITY (JarSecurity)
 SECURITY_LOG_PATH = os.path.join(JARVIS_DIR, "security_log.jsonl")
 

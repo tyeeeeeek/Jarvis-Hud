@@ -39,6 +39,9 @@ interface HealthStatus {
   hottest_c?: number | null;
 }
 
+interface AiServiceStatus { label: string; up: boolean }
+type AiServicesStatus = Record<string, AiServiceStatus>;
+
 interface PortResult { port: number; proto: string; service: string }
 interface ProbeResult { reachable: boolean; port?: number; server?: string | null; title?: string | null }
 interface DeviceInspection { hostname: string | null; ports: PortResult[]; probe: ProbeResult }
@@ -101,6 +104,8 @@ export function HomelabWidget() {
   const [ipLoading, setIpLoading] = useState(false);
   const [ipError, setIpError] = useState(false);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [aiServices, setAiServices] = useState<AiServicesStatus | null>(null);
+  const [restartingService, setRestartingService] = useState<string | null>(null);
   const [deviceInfo, setDeviceInfo] = useState<Record<string, DeviceInspection | "loading" | "error">>({});
   const [gateway, setGateway] = useState<string | null>(null);
   const [gatewayProbe, setGatewayProbe] = useState<ProbeResult | "loading" | null>(null);
@@ -132,7 +137,29 @@ export function HomelabWidget() {
       const r = await fetch(`${API}/homelab/health`);
       if (r.ok) setHealth(await r.json());
     } catch { /* ignore -- JARVIS HOST section just shows NO DATA */ }
+
+    try {
+      const r = await fetch(`${API}/homelab/ai_services`);
+      if (r.ok) {
+        const data = await r.json();
+        setAiServices(Object.keys(data).length ? data : null);
+      }
+    } catch { /* ignore -- LOCAL AI SERVICES section just shows NO DATA */ }
   }, []);
+
+  const restartAiService = async (service: string) => {
+    setRestartingService(service);
+    try {
+      const r = await fetch(`${API}/homelab/ai_services/restart`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service }),
+      });
+      const data = await r.json();
+      if (data.services) setAiServices(data.services);
+    } catch { /* ignore -- status just stays as last known */ }
+    setRestartingService(null);
+  };
 
   // Combines a port scan + reverse-DNS hostname lookup + HTTP banner probe
   // into one "INSPECT" action per device -- three separate on-demand
@@ -455,6 +482,30 @@ export function HomelabWidget() {
         </div>
       ) : (
         <span className="w-idle">NO HEALTH DATA YET — RUNS AUTOMATICALLY EVERY 2H</span>
+      )}
+
+      <div className="w-divider" />
+      <span className="w-sublabel">LOCAL AI SERVICES</span>
+      {aiServices ? (
+        Object.entries(aiServices).map(([key, s]) => (
+          <div key={key} className="w-row w-row--spread">
+            <span className="w-stat-lbl">{s.label.toUpperCase()}</span>
+            <span className={`w-stat-val ${s.up ? "" : "w-stat-val--bad"}`}>
+              {s.up ? "UP" : "DOWN"}
+            </span>
+            {!s.up && (
+              <button
+                className="w-rack-detail__scan-btn"
+                onClick={() => restartAiService(key)}
+                disabled={restartingService === key}
+              >
+                {restartingService === key ? "RESTARTING…" : "RESTART"}
+              </button>
+            )}
+          </div>
+        ))
+      ) : (
+        <span className="w-idle">NO DATA YET — RUNS AUTOMATICALLY EVERY 10M</span>
       )}
 
       <div className="w-divider" />

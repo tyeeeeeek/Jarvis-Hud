@@ -680,6 +680,35 @@ Homelab widget also has a manual "RUN SPEED TEST" / "SCAN NOW" button for either
 guesses wrong (e.g. your network isn't a /24) — leave it blank first and check the
 terminal output before touching it.
 
+### Local AI/monitoring services watchdog (Ollama, Prometheus)
+
+A background check (`check_ai_services`, every 10 minutes) hits Ollama's and
+Prometheus's own health endpoints (`localhost:11434`/`localhost:9090`) and, if
+either is down, automatically tries `restart_ai_service` once — a Docker
+container restart if one named `ollama`/`prometheus` exists, otherwise a systemd
+unit restart (`ollama.service`/`prometheus.service`). The outcome (restarted, or
+why it couldn't) is sent over Telegram/SMS the same way other watchdogs alert,
+and the Homelab widget's "LOCAL AI SERVICES" section shows live UP/DOWN status
+with its own manual RESTART button. This is deliberately narrow — only these two
+exact named services are ever restartable (see `tools._AI_SERVICES`), never an
+arbitrary systemctl/docker target.
+
+If either service runs as a system-level (not `--user`) systemd unit, restarting
+it needs root, same as `system_power`'s shutdown — add a scoped NOPASSWD rule so
+it can happen without a password prompt:
+
+```
+sudo tee /etc/sudoers.d/jarvis-ai-services <<'EOF'
+tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/systemctl restart ollama.service
+tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/systemctl restart prometheus.service
+EOF
+sudo chmod 0440 /etc/sudoers.d/jarvis-ai-services
+sudo visudo -c   # confirm it says "parsed OK"
+```
+
+Without this, a down system-level service gets a clear "passwordless sudo isn't
+set up yet" message instead of restarting — never a hang, never a silent no-op.
+
 ---
 
 ## Connect email + calendar (Gmail & Outlook)

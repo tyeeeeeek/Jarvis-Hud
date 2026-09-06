@@ -901,6 +901,46 @@ def _finance_watcher_thread():
             break
 
 
+_AI_SERVICES_CHECK_INTERVAL_SECONDS = 10 * 60
+
+
+def _ai_services_watcher_thread():
+    """Runs tools.check_ai_services() every 10 minutes for as long as
+    Jarvis's backend is running -- Ollama and Prometheus, the two local
+    services this project's own AI/monitoring stack depends on (see
+    tools._AI_SERVICES). Any service found down gets one automatic
+    tools.restart_ai_service() attempt, and the outcome (restarted, or
+    restart failed and why) is announced once via _notify_all + bot_events.
+    _alerted tracks which services already got an alert this outage so a
+    restart that fails doesn't spam the same alert every 10 minutes; it's
+    cleared the moment a service is confirmed back up, so a future outage
+    still alerts fresh. No dedicated Telegram bot for this, same reasoning
+    as _finance_watcher_thread above."""
+    _alerted = set()
+    while not pipeline_stop.is_set():
+        try:
+            tools.check_ai_services()
+        except Exception as e:
+            print(f"  [AIServices] {e}")
+        down_now = {k for k, v in tools.LAST_AI_SERVICES_RESULT.items() if not v.get("up")}
+        for key in down_now:
+            if key in _alerted:
+                continue
+            _alerted.add(key)
+            label = tools.LAST_AI_SERVICES_RESULT[key]["label"]
+            try:
+                result = tools.restart_ai_service(key)
+            except Exception as e:
+                result = f"restart attempt errored: {e}"
+            text = f"{label} was down sir -- {result}"
+            print(f"  [AIServices] {text}")
+            _notify_all(text)
+            bot_events.publish("ai_service_alert", {"service": key, "text": text})
+        _alerted &= down_now
+        if pipeline_stop.wait(_AI_SERVICES_CHECK_INTERVAL_SECONDS):
+            break
+
+
 _IMPROVEMENT_START_HOUR = 6
 _IMPROVEMENT_START_MINUTE = 0
 
@@ -1406,6 +1446,7 @@ def voice_loop():
     threading.Thread(target=_reminder_watcher_thread, daemon=True, name="Reminders").start()
     threading.Thread(target=_health_watcher_thread, daemon=True, name="Health").start()
     threading.Thread(target=_finance_watcher_thread, daemon=True, name="FinanceWatch").start()
+    threading.Thread(target=_ai_services_watcher_thread, daemon=True, name="AIServicesWatch").start()
     threading.Thread(target=_employee_worker_thread, daemon=True, name="EmployeeWorker").start()
     threading.Thread(target=_agent_scheduler_thread, daemon=True, name="AgentScheduler").start()
     threading.Thread(target=_improvement_watcher_thread, daemon=True, name="Improvement").start()
