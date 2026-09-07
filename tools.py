@@ -83,6 +83,7 @@ import network_watch
 import speedtest_service
 import synology_service
 import tailscale_service
+import fleet_service
 
 
 HOME = os.path.expanduser("~")
@@ -2638,6 +2639,76 @@ def tailscale_disconnect() -> str:
     except Exception as e:
         return f"I couldn't disconnect sir: {e}"
     return "Tailscale's down sir."
+
+
+# ================================================================ FLEET (remote tailnet devices)
+def list_fleet_devices() -> str:
+    """List every fleet device Jarvis can reach into (not just ping --
+    see get_tailscale_status for that), what it can run there, and
+    whether it's actually set up yet. Use for "what can you do on my
+    other computers"/"is [device] set up for remote control" requests."""
+    devices = fleet_service.list_devices()
+    lines = []
+    for d in devices:
+        state = "ready" if d["configured"] else "not configured yet"
+        lines.append(f"{d['name']} ({d['os']}, {state}) -- can run: {', '.join(d['actions'])}")
+    return "Fleet devices sir:\n" + "\n".join(lines)
+
+
+def fleet_status(device: str) -> str:
+    """Check basic health (uptime, disk, memory) on a named fleet device
+    -- tyestore, tyewinpc1, tyepc, or tyewintablet. Read-only. Use for
+    "how's [device] doing"/"check on my [device]" requests. Call
+    list_fleet_devices first if unsure a device is set up."""
+    try:
+        result = fleet_service.run_action(device, "status")
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't reach {device} sir: {e}"
+    return f"{device} sir:\n{result['output']}"
+
+
+def fleet_restart(device: str) -> str:
+    """Restart a named Windows fleet device -- tyewinpc1, tyepc, or
+    tyewintablet (not tyestore; no restart action is offered for the
+    NAS). Gives it a 60-second warning before restarting, same as this
+    machine's own system_power. If JARVIS_ADMIN_BOT_TOKEN is configured,
+    first waits for explicit yes/no approval over the dedicated
+    JarvisAdmin Telegram bot, exactly like system_power and
+    run_admin_action -- this call blocks until answered or times out."""
+    device = (device or "").strip().lower()
+    dev = fleet_service.FLEET_DEVICES.get(device)
+    if dev and dev["os"] != "windows":
+        return f"There's no restart action for {device} sir -- that's only offered on the Windows boxes."
+
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"restart {device} (60 second warning first)")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't restart that."
+
+    try:
+        fleet_service.run_action(device, "restart")
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't restart {device} sir: {e}"
+    return f"Restarting {device} in 60 seconds, sir. Say 'cancel restart on {device}' if you change your mind."
+
+
+def fleet_cancel_restart(device: str) -> str:
+    """Cancel a pending restart on a named Windows fleet device that was
+    just scheduled via fleet_restart, before its 60-second warning runs
+    out."""
+    try:
+        fleet_service.run_action(device, "cancel_restart")
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't cancel that on {device} sir: {e}"
+    return f"Cancelled the pending restart on {device}, sir."
 
 
 # ================================================================ FINANCE (unchanged services, thin wrappers)

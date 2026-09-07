@@ -351,6 +351,47 @@ def _homelab_ai_services_restart():
     return jsonify({"result": result, "services": tools.LAST_AI_SERVICES_RESULT or {}})
 
 
+@app.route("/homelab/fleet")
+def _homelab_fleet():
+    """Every fleet device Jarvis can reach into, what it can run there,
+    and whether it's actually configured yet -- read-only, no SSH call
+    made here (see fleet_service.list_devices's docstring)."""
+    import fleet_service
+    return jsonify({"devices": fleet_service.list_devices()})
+
+
+@app.route("/homelab/fleet/status", methods=["POST"])
+def _homelab_fleet_status():
+    """On-demand status check on one fleet device -- makes a real SSH
+    call, can take a few seconds, and fails with a specific reason (not
+    configured yet / unreachable / non-zero exit) rather than a generic
+    error if something's wrong."""
+    import fleet_service
+    device = (request.get_json(silent=True) or {}).get("device", "")
+    try:
+        result = fleet_service.run_action(device, "status")
+        return jsonify({"ok": True, "output": result["output"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+
+@app.route("/homelab/fleet/restart", methods=["POST"])
+def _homelab_fleet_restart():
+    """Restart a Windows fleet device. This route IS tools.fleet_restart
+    -- same JarvisAdmin Telegram approval gate as system_power on this
+    machine, so the call can block for a while waiting on that answer."""
+    import tools
+    device = (request.get_json(silent=True) or {}).get("device", "")
+    return jsonify({"result": tools.fleet_restart(device)})
+
+
+@app.route("/homelab/fleet/cancel_restart", methods=["POST"])
+def _homelab_fleet_cancel_restart():
+    import tools
+    device = (request.get_json(silent=True) or {}).get("device", "")
+    return jsonify({"result": tools.fleet_cancel_restart(device)})
+
+
 def start_server():
     statements_service.ensure_statements_dir()
 

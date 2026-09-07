@@ -6,6 +6,7 @@ import { AuroraField } from "./AuroraField";
 import { TimeWidget } from "./TimeWidget";
 import { FinanceWidget } from "./FinanceWidget";
 import { HomelabWidget } from "./HomelabWidget";
+import { FleetWidget } from "./FleetWidget";
 import { JarvisCore } from "./JarvisCore";
 import { PcInternals, type PcHealth } from "./PcInternals";
 import { JarvisConsole, type LogEntry } from "./JarvisConsole";
@@ -22,7 +23,7 @@ import "./ArcReactor.css";
 const MAX_LOG_ENTRIES = 8;
 const MAX_VISION_ENTRIES = 6;
 
-type PageId = "weather" | "time" | "jarvisConsole" | "finance" | "homelab" | "vision" | "cameraFeed" | "map" | "jarvisCore" | "pcInternals";
+type PageId = "weather" | "time" | "jarvisConsole" | "finance" | "homelab" | "fleet" | "vision" | "cameraFeed" | "map" | "jarvisCore" | "pcInternals";
 
 // Order here is the dock's left-to-right order too.
 const PAGE_LABELS: Record<PageId, string> = {
@@ -30,6 +31,7 @@ const PAGE_LABELS: Record<PageId, string> = {
   time: "Time",
   finance: "Finance",
   homelab: "Homelab",
+  fleet: "Fleet",
   jarvisConsole: "Jarvis Console",
   vision: "Phone Vision",
   cameraFeed: "Phone Camera",
@@ -50,6 +52,7 @@ const DOCK_ICONS: Record<PageId, React.ReactNode> = {
   time: <svg {...ICON_PROPS}><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>,
   finance: <svg {...ICON_PROPS}><path d="M4 19h16" /><path d="M7 19v-5M12 19V8M17 19v-9" /></svg>,
   homelab: <svg {...ICON_PROPS}><rect x="4.5" y="4" width="15" height="6" rx="1.2" /><rect x="4.5" y="14" width="15" height="6" rx="1.2" /><path d="M8 7h.01M8 17h.01" /></svg>,
+  fleet: <svg {...ICON_PROPS}><circle cx="12" cy="5.5" r="2" /><circle cx="5.5" cy="17" r="2" /><circle cx="18.5" cy="17" r="2" /><path d="M12 7.5v3M10.6 12.7 7 15.3M13.4 12.7 17 15.3" /></svg>,
   jarvisConsole: <svg {...ICON_PROPS}><path d="M12 3v4M8 5.5v3M16 5.5v3" /><rect x="5" y="9" width="14" height="9" rx="3" /><path d="M9.5 21h5" /></svg>,
   vision: <svg {...ICON_PROPS}><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.6" /></svg>,
   cameraFeed: <svg {...ICON_PROPS}><path d="M4 8.5a1.5 1.5 0 0 1 1.5-1.5h2l1.2-2h6.6l1.2 2h2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5Z" /><circle cx="12" cy="13" r="3.2" /></svg>,
@@ -535,12 +538,13 @@ export default function ArcReactor() {
     time: <TimeWidget />,
     finance: <FinanceWidget />,
     homelab: <HomelabWidget />,
+    fleet: <FleetWidget />,
     jarvisCore: <JarvisCore />,
     pcInternals: <PcInternals health={pcHealth} />,
     jarvisConsole: <JarvisConsole status={jarvisStatus} log={log} connected={jarvisConnected} />,
     vision: <VisionWidget entries={visionLog} />,
     cameraFeed: <CameraFeedWidget frame={cameraFrame} />,
-    map: <MapWidget target={mapTarget} radarRequest={radarRequest} />,
+    map: <MapWidget target={mapTarget} radarRequest={radarRequest} onClose={closePage} />,
   };
 
   return (

@@ -54,6 +54,7 @@ _TOOL_FUNCS = [
     tools.check_ai_services, tools.restart_ai_service,
     tools.get_tailscale_status, tools.tailscale_ping, tools.set_tailscale_exit_node,
     tools.tailscale_connect, tools.tailscale_disconnect,
+    tools.list_fleet_devices, tools.fleet_status, tools.fleet_restart, tools.fleet_cancel_restart,
     tools.sync_bank_data, tools.get_spending_summary, tools.get_financial_insights,
     tools.build_finance_dashboard,
     tools.enable_eyes, tools.disable_eyes, tools.describe_screen,
