@@ -8,8 +8,9 @@ Electron, React, and a Python voice pipeline. Highlights:
   filesystem (scoped to safe folders), app launch/close, disk cleanup, weather, email
   drafts, YouTube playback, screen vision, reminders/notes, bank-statement spending
   summaries, and a "creator mode" that builds and shows you a webpage or dashboard.
-  [Ollama](https://ollama.com) is kept only as an offline chit-chat fallback (no tool
-  access) if the Claude CLI can't be reached.
+  [Groq](https://console.groq.com) (fast cloud chit-chat, no tool access) is tried
+  first if the Claude CLI can't be reached, then [Ollama](https://ollama.com) (fully
+  offline chit-chat, also no tool access) if Groq isn't configured or also fails.
 - **Real YouTube control**: "play [song] by [artist]" drives a dedicated, visible,
   Playwright-controlled Chromium window that actually searches and clicks play — not
   just a search page. "stop"/"close the browser" shut it back down; the next open
@@ -269,8 +270,10 @@ new, narrowly-scoped one instead.
    phrases (time, date, greetings, exit, media keys) for a zero-latency reply. Anything
    else is handed to **`brain.py`**, which runs it through the Claude Code CLI with
    real tool-calling access to everything in `tools.py` (websites, YouTube, files,
-   apps, weather, reminders, creator mode, and more) — falling back to a local,
-   tools-off **Ollama** model only if Claude Code can't be reached.
+   apps, weather, reminders, creator mode, and more) — falling back to a fast,
+   tools-off **Groq** model if Claude Code can't be reached, then to a local,
+   tools-off **Ollama** model if Groq isn't configured (no `GROQ_API_KEY`) or also
+   fails.
 4. While the brain works, each tool call it makes is streamed back to the HUD live as
    an "activity" caption (e.g. "Searching YouTube for ...") — you see what Jarvis is
    doing, not just a spinner.
@@ -1109,9 +1112,10 @@ where you installed them.
 
 **Jarvis feels "dumb" / says it can't do things it should be able to (offline fallback)**
 This means `brain.py` couldn't reach the Claude Code CLI, so Jarvis silently dropped to
-the tools-off Ollama fallback. Make sure `claude` is installed and authenticated
-(`claude auth login`), and that `venv/Scripts/python.exe -m pip show mcp` shows the
-package installed. Check the `jarvis.py` terminal output for `[Brain] Launch error`.
+the tools-off Groq fallback (or straight to Ollama if `GROQ_API_KEY` isn't set). Make
+sure `claude` is installed and authenticated (`claude auth login`), and that
+`venv/Scripts/python.exe -m pip show mcp` shows the package installed. Check the
+`jarvis.py` terminal output for `[Brain] Launch error`.
 
 **"I don't have a Bash tool" / a command Jarvis should clearly be able to do fails**
 That's the safety sandbox working as intended if it's a real shell command — Jarvis
@@ -1125,7 +1129,9 @@ The first `play_youtube` call downloads nothing new (Chromium was installed via
 it didn't open behind the HUD. If it errors, re-run `playwright install chromium`.
 
 **AI responses say "I can't reach my brain right now, and my main brain is offline too"**
-Both the Claude CLI and the Ollama fallback failed. For Ollama specifically: run
+The Claude CLI, Groq, and the Ollama fallback all failed (or Groq was never
+configured). For Groq: check `GROQ_API_KEY` is set in `.env` and valid at
+[console.groq.com/keys](https://console.groq.com/keys). For Ollama: run
 `ollama serve` and `ollama pull llama3.2` (or update `OLLAMA_MODEL` in `jarvis.py` to
 whatever model you've pulled instead).
 

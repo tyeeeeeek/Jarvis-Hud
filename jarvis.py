@@ -86,6 +86,11 @@ except ImportError:
 
 # ================================================================ SETTINGS
 OLLAMA_MODEL, OLLAMA_URL = "llama3.2", "http://localhost:11434/api/generate"
+# Groq retires/renames model ids fairly often (same story as Gemini in
+# vision_service.py) -- if this 404s with "model does not exist", check
+# https://api.groq.com/openai/v1/models (with your key) for what's current.
+GROQ_MODEL, GROQ_URL = "openai/gpt-oss-120b", "https://api.groq.com/openai/v1/chat/completions"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 WAKE_WORD, SPEECH_RATE, WAKE_COOLDOWN = "jarvis", 2, 2.0
 SAMPLE_RATE, CHUNK_SIZE = 16000, 8000
 CTX_TIMEOUT, WS_PORT, INLINE_WAIT_SECS = 15.0, 8765, 1.5
@@ -618,9 +623,27 @@ def get_command(timeout=7, clear=True, silence_gap=2.0):
     return collected or None
 
 
-# ================================================================ OLLAMA (LOCAL AI FALLBACK)
-# Used only when the Claude brain is unreachable (offline, not authenticated,
-# claude.exe missing). No tool access in this path -- chat only.
+# ================================================================ FALLBACK BRAINS
+# Used only when the main Claude brain is unreachable (offline, not
+# authenticated, claude.exe missing). Neither path has tool access -- chat
+# only. Groq is tried first (fast, cloud, needs GROQ_API_KEY -- inert
+# no-op until that's set in .env, same "no-op until configured" pattern
+# vision_service.py uses for GEMINI_API_KEY); if it's not configured or the
+# call fails for any reason, ask_ollama is the final, fully-offline fallback.
+_GROQ_SYSTEM = (
+    "You are J.A.R.V.I.S, a voice assistant currently running on a fast "
+    "backup brain with no tool access -- you can't check files, run "
+    "commands, or reach any of your normal capabilities right now, only "
+    "talk. You only know what the user directly tells you in this message. "
+    "Never invent facts, events, numbers, times, or scenarios that were not "
+    "stated by the user. If asked to do something that needs a real tool, "
+    "say plainly you're running on backup and can't reach your full "
+    "capabilities right now. Speak with calm confidence and quiet wit. "
+    "Address the user as sir occasionally but not every sentence. Keep "
+    "answers under 40 words. Short natural sentences. Never use bullet "
+    "points or markdown. Never say your own name."
+)
+
 _OLLAMA_SYSTEM = (
     "You are J.A.R.V.I.S, a voice assistant currently running in offline "
     "fallback mode with no internet access and no tools. You only know what "
@@ -632,6 +655,32 @@ _OLLAMA_SYSTEM = (
     "not every sentence. Keep answers under 40 words. Short natural "
     "sentences. Never use bullet points or markdown. Never say your own name."
 )
+
+
+def ask_groq(question):
+    """Fast cloud fallback tried before the fully-offline Ollama path.
+    Returns "" (never raises) if GROQ_API_KEY isn't set or the call fails
+    for any reason, so the caller falls through to ask_ollama."""
+    if not GROQ_API_KEY:
+        return ""
+    try:
+        r = requests.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": _GROQ_SYSTEM},
+                    {"role": "user", "content": question},
+                ],
+            },
+            timeout=15,
+        )
+        if r.status_code == 200:
+            return (r.json()["choices"][0]["message"]["content"] or "").strip()
+    except Exception as e:
+        print(f"  [Jarvis] ask_groq error: {e}")
+    return ""
 
 
 def ask_ollama(question):
@@ -1419,8 +1468,11 @@ def handle_command(command, acked=False, notify=None):
                 # speak a stray fallback reply for the command it cancelled.
                 return None
         if reply is None:
-            set_status("Processing (offline)")
-            reply = ask_ollama(command)
+            set_status("Processing (fallback)")
+            reply = ask_groq(command)
+            if not reply:
+                set_status("Processing (offline)")
+                reply = ask_ollama(command)
         return _reply(reply)
 
 

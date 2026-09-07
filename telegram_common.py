@@ -33,12 +33,14 @@
 #   small local one. That's a real behavior change worth knowing: unlike
 #   the old local-only Ollama call, this path sends `context_text`/
 #   `user_text` to Anthropic's API (same place voice/text commands already
-#   go via brain.py) rather than staying fully offline. Falls back to the
-#   local Ollama model (same offline safety model as jarvis.py's own
-#   ask_ollama) if the Claude CLI isn't installed or the call fails, and
-#   falls back to returning context_text unchanged if neither is
-#   available, so a two-way bot still replies with something true even in
-#   the worst case.
+#   go via brain.py) rather than staying fully offline. Falls back to Groq
+#   (same fast cloud fallback as jarvis.py's own ask_groq -- inert until
+#   GROQ_API_KEY is set) if the Claude CLI isn't installed or the call
+#   fails, then to the local Ollama model (same offline safety model as
+#   jarvis.py's own ask_ollama) if Groq isn't configured or also fails, and
+#   finally falls back to returning context_text unchanged if none of the
+#   three are available, so a two-way bot still replies with something true
+#   even in the worst case.
 # ================================================================
 import json
 import os
@@ -53,6 +55,13 @@ DELIVERY_LOG_PATH = os.path.join(_JARVIS_DIR, "telegram_delivery_log.jsonl")
 
 _OLLAMA_URL = "http://localhost:11434/api/generate"
 _OLLAMA_MODEL = "llama3.2"
+
+_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# Groq retires/renames model ids fairly often -- if this 404s with "model
+# does not exist", check https://api.groq.com/openai/v1/models (with your
+# key) for what's current.
+_GROQ_MODEL = "openai/gpt-oss-120b"
+_GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 
 _CLAUDE_CLI = shutil.which("claude")
 _CLAUDE_CLI_TIMEOUT_SECS = 45
@@ -93,6 +102,32 @@ def _ask_claude_cli(system: str, user_prompt: str) -> str:
     return ""
 
 
+def _ask_groq(system: str, agent_name: str, user_prompt: str) -> str:
+    """Fast cloud fallback tried before the fully-offline Ollama path.
+    Returns "" (never raises) if GROQ_API_KEY isn't set or the call fails
+    for any reason, so the caller falls through to _ask_ollama."""
+    if not _GROQ_API_KEY:
+        return ""
+    try:
+        r = requests.post(
+            _GROQ_URL,
+            headers={"Authorization": f"Bearer {_GROQ_API_KEY}"},
+            json={
+                "model": _GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_prompt},
+                ],
+            },
+            timeout=15,
+        )
+        if r.status_code == 200:
+            return (r.json()["choices"][0]["message"]["content"] or "").strip()
+    except Exception as e:
+        print(f"  [{agent_name}] ask_grounded Groq fallback error: {e}")
+    return ""
+
+
 def _ask_ollama(system: str, agent_name: str, context_text: str, user_text: str) -> str:
     prompt = f"{system}\n\nData you know:\n{context_text}\n\nUser just said: {user_text}\n{agent_name}:"
     try:
@@ -117,6 +152,9 @@ def ask_grounded(agent_name: str, role_description: str, context_text: str, user
     system = _grounded_system_prompt(agent_name, role_description)
     user_prompt = f"Data you know:\n{context_text}\n\nUser just said: {user_text}\nReply as {agent_name}, in character, with just the reply text:"
     reply = _ask_claude_cli(system, user_prompt)
+    if reply:
+        return reply
+    reply = _ask_groq(system, agent_name, user_prompt)
     if reply:
         return reply
     reply = _ask_ollama(system, agent_name, context_text, user_text)
