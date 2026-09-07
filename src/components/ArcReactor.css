@@ -818,9 +818,21 @@ html, body, #root {
   backdrop-filter: blur(6px); pointer-events: none;
 }
 .w-map__toggle--float {
-  position: absolute; top: 32px; right: 20px; z-index: 500;
+  position: absolute; top: 64px; right: 20px; z-index: 500;
   backdrop-filter: blur(6px);
 }
+/* Back-to-home chip -- the map is the one fullBleed HudPage (no header/
+   close button), so without this the only way back is Esc or clicking
+   the shrunk reactor ring, neither of which is discoverable. Sits above
+   the RADAR/STREET VIEW toggles in the same top-right corner. */
+.w-map__close {
+  position: absolute; top: 20px; right: 20px; z-index: 600;
+  width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
+  background: rgba(0,240,255,0.08); border: 1px solid rgba(0,240,255,0.25);
+  color: rgba(0,240,255,0.75); font-family: var(--hud-font); font-size: 13px;
+  backdrop-filter: blur(6px);
+}
+.w-map__close:hover { background: rgba(0,240,255,0.18); color: #fff; }
 .w-map__loading {
   position: absolute; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center;
   background: rgba(0,10,20,0.55); font-family: var(--hud-font); font-size: 10px;
@@ -863,7 +875,7 @@ html, body, #root {
 
 /* Second floating toggle, stacked under RADAR (both top:32px/right:20px
    would overlap otherwise). */
-.w-map__toggle--street { top: 70px; }
+.w-map__toggle--street { top: 102px; }
 
 /* Street-level imagery panel (Mapillary) -- an overlay within the map
    page, same chrome language as the radar loading state, not a separate

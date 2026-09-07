@@ -21,6 +21,11 @@ interface MapWidgetProps {
    * re-centers at the same time. Bumped by a counter, not a boolean,
    * so asking for radar on the same city twice still visibly reacts. */
   radarRequest: { target: MapTarget | null; nonce: number } | null;
+  /** Returns to the Jarvis home page. The map is rendered full-bleed (no
+   * HudPage header), so without this the only way back is Esc or
+   * clicking the shrunk reactor ring -- neither is discoverable, hence
+   * this explicit close chip. */
+  onClose: () => void;
 }
 
 // Bethel, CT -- same default the Weather widget already centers on
@@ -65,7 +70,7 @@ function buildMarkerEl(): HTMLDivElement {
   return el;
 }
 
-export function MapWidget({ target, radarRequest }: MapWidgetProps) {
+export function MapWidget({ target, radarRequest, onClose }: MapWidgetProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markerRef = useRef<maplibregl.Marker | null>(null);
@@ -304,6 +309,14 @@ export function MapWidget({ target, radarRequest }: MapWidgetProps) {
   return (
     <div className="w-map w-map--full">
       <div className="w-map__canvas" ref={containerRef}>
+        <button
+          className="w-map__close"
+          onClick={onClose}
+          title="Back to Jarvis (Esc)"
+        >
+          ✕
+        </button>
+
         <div className="w-map__overlay-label">
           <span className="w-sublabel">{radarOn ? "WEATHER RADAR" : "MAP"}</span>
           <span className="w-map__location">{shortName(activePoint.name)}</span>
