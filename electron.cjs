@@ -79,6 +79,8 @@ function createWindow() {
   const { width, height } = screen.getPrimaryDisplay().bounds;
 
   mainWindow = new BrowserWindow({
+    x: 0,
+    y: 0,
     width,
     height,
     minWidth: 480,
@@ -114,7 +116,12 @@ function createWindow() {
   }
 
   mainWindow.once("ready-to-show", () => {
-    mainWindow.setFullScreen(true);
+    // Deliberately NOT mainWindow.setFullScreen(true) here -- true OS
+    // fullscreen is pinned by the window manager and can't be dragged
+    // around the screen, even with the drag-region title bar (hover the
+    // top edge) below. The window is already created at x:0,y:0 sized to
+    // the full display bounds, so it looks identical to fullscreen on
+    // launch but stays a normal, movable/minimizable window.
     mainWindow.show();
   });
 
