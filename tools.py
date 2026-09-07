@@ -1959,6 +1959,36 @@ def run_rootkit_scan() -> str:
     return "Clean sir -- no rootkit warnings found."
 
 
+# Persists the last deep-scan signature that actually triggered a loud
+# JarSecurity alert, across restarts -- unlike run_security_check()'s
+# _security_watcher_thread (whose in-memory-only dedup is fine because
+# that thread runs continuously for as long as the process lives), this
+# watcher only fires once per process start, and jarvis-backend.service
+# genuinely does get restarted several times a day (deploys, dev
+# restarts). Without persisting to disk, every restart re-triggers the
+# loud alert for the exact same still-unresolved finding (observed live:
+# the same one lynis warning alerted 4 times in under 5 hours across two
+# close-together restarts). Same atomic tmp+replace pattern as
+# statements_service.py's ANOMALIES_SEEN_PATH.
+DEEP_SCAN_ALERT_STATE_PATH = os.path.join(HOME, ".jarvis", "deep_scan_alert_state.json")
+
+
+def _load_deep_scan_alert_signature():
+    try:
+        with open(DEEP_SCAN_ALERT_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f).get("signature")
+    except Exception:
+        return None
+
+
+def _save_deep_scan_alert_signature(signature):
+    _ensure_jarvis_dir()
+    tmp = DEEP_SCAN_ALERT_STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"signature": signature}, f)
+    os.replace(tmp, DEEP_SCAN_ALERT_STATE_PATH)
+
+
 def log_deep_scan_result() -> dict:
     """Logs the most recent run_security_audit()/run_rootkit_scan() results
     (from LAST_AUDIT_RESULT/LAST_ROOTKIT_RESULT) as one deep_scan entry in
@@ -1966,9 +1996,14 @@ def log_deep_scan_result() -> dict:
     4-hour sweep entries (security_status_report() filters on the
     "deep_scan" flag to report them separately). Called once daily by
     jarvis.py's deep-scan watcher thread, after both scans have run.
-    Returns {"critical", "summary"} so the caller can decide whether to
-    alert -- critical means a REAL lynis warning (not a suggestion) or any
-    rkhunter warning, not just "the scan ran successfully"."""
+    Returns {"critical", "should_alert", "summary"} -- critical means a
+    REAL lynis warning (not a suggestion) or any rkhunter warning, not
+    just "the scan ran successfully"; should_alert is critical AND the
+    exact set of warnings has changed since the last time this actually
+    alerted (persisted to DEEP_SCAN_ALERT_STATE_PATH), so an unresolved
+    finding that's still there tomorrow -- or after an unrelated service
+    restart today -- doesn't re-fire the loud JarSecurity alert path every
+    time; the caller should still send a quiet summary either way."""
     lynis_warnings = LAST_AUDIT_RESULT.get("warnings") or []
     lynis_suggestions = LAST_AUDIT_RESULT.get("suggestions") or []
     hardening_index = LAST_AUDIT_RESULT.get("hardening_index")
@@ -1983,13 +2018,23 @@ def log_deep_scan_result() -> dict:
         "rkhunter_warnings": len(rkhunter_warnings), "rkhunter_warning_list": rkhunter_warnings[:10],
         "critical": critical,
     })
+
+    should_alert = False
+    if critical:
+        signature = [sorted(lynis_warnings), sorted(rkhunter_warnings)]
+        if signature != _load_deep_scan_alert_signature():
+            should_alert = True
+            _save_deep_scan_alert_signature(signature)
+    else:
+        _save_deep_scan_alert_signature(None)
+
     summary = (f"deep scan: hardening index {hardening_index or '–'}/100, "
                f"{len(lynis_warnings)} lynis warning(s), {len(rkhunter_warnings)} rkhunter warning(s)")
     if lynis_warnings:
         summary += "\nlynis: " + "; ".join(lynis_warnings[:5])
     if rkhunter_warnings:
         summary += "\nrkhunter: " + "; ".join(rkhunter_warnings[:5])
-    return {"critical": critical, "summary": summary}
+    return {"critical": critical, "should_alert": should_alert, "summary": summary}
 
 
 # ================================================================ LOCAL AI/MONITORING SERVICES WATCHDOG (Ollama, Prometheus)

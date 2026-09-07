@@ -1150,11 +1150,19 @@ def _deep_security_watcher_thread():
     the cheap 4-hour run_security_check() sweep above, so they get their
     own schedule. Logs via tools.log_deep_scan_result() (a distinct
     "deep_scan" entry in the same security_log.jsonl run_security_check()
-    already writes to) and alerts through JarSecurity immediately on a
-    real finding -- a genuine lynis warning or any rkhunter warning, not
-    just "the scan completed" -- same alert path (and same
-    bot_events "security_critical" event feeding the phone dashboard's
-    Live Activity feed) run_security_check() already uses."""
+    already writes to) and alerts through JarSecurity on a real finding --
+    a genuine lynis warning or any rkhunter warning, not just "the scan
+    completed" -- same alert path (and same bot_events "security_critical"
+    event feeding the phone dashboard's Live Activity feed)
+    run_security_check() already uses.
+
+    This thread only runs its scan once per process start (see
+    _DEEP_SECURITY_INTERVAL_SECONDS), and jarvis-backend.service does get
+    restarted several times in a normal day -- log_deep_scan_result()'s
+    should_alert (persisted to disk, unlike run_security_check()'s
+    in-memory-only dedup above) is what stops each of those restarts from
+    re-firing the loud alert for the same still-unresolved finding; the
+    quiet JarSecurity summary still goes out every time either way."""
     while not pipeline_stop.is_set():
         try:
             audit_text = tools.run_security_audit()
@@ -1162,7 +1170,7 @@ def _deep_security_watcher_thread():
             rootkit_text = tools.run_rootkit_scan()
             print(f"  [DeepSecurity] rkhunter: {rootkit_text}")
             result = tools.log_deep_scan_result()
-            if result["critical"]:
+            if result["should_alert"]:
                 jarvis_security.send_alert(result["summary"])
                 bot_events.publish("security_critical", {"result": result["summary"]})
             else:
