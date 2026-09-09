@@ -30,6 +30,7 @@ import shutil
 import socket
 import ipaddress
 import subprocess
+import concurrent.futures
 
 import requests
 
@@ -38,6 +39,16 @@ KNOWN_DEVICES_PATH = os.path.join(JARVIS_DIR, "known_devices.json")
 
 NMAP_BIN = shutil.which("nmap")
 NMAP_AVAILABLE = bool(NMAP_BIN)
+
+# nmap ships its own offline OUI (MAC vendor prefix) database -- reusing it
+# means vendor lookup is a local file read, never a network call to some
+# third-party MAC-lookup API. Path is Debian/Ubuntu's default; harmless if
+# missing (vendor just comes back None).
+_OUI_PATHS = [
+    "/usr/share/nmap/nmap-mac-prefixes",
+    "/usr/local/share/nmap/nmap-mac-prefixes",
+]
+_oui_table = None
 
 # Override if auto-detection guesses the wrong subnet (e.g. not a /24) --
 # see .env.example / README "Homelab" section.
@@ -126,12 +137,62 @@ def _read_neighbors():
     return devices
 
 
+def _load_oui_table():
+    """Lazy, process-lifetime cache of nmap's bundled MAC-prefix -> vendor
+    database. Returns {} (not an error) if the file isn't found, since
+    vendor is always best-effort."""
+    global _oui_table
+    if _oui_table is not None:
+        return _oui_table
+    table = {}
+    for path in _OUI_PATHS:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.rstrip("\n").split(None, 1)
+                    if len(parts) == 2 and len(parts[0]) == 6:
+                        table[parts[0].upper()] = parts[1].strip()
+            break
+        except Exception:
+            continue
+    _oui_table = table
+    return table
+
+
+def _vendor_for(mac):
+    """Best-effort vendor name for a MAC's OUI (first 3 octets), from the
+    local nmap prefix database -- None if the table or the prefix isn't
+    available."""
+    table = _load_oui_table()
+    if not table:
+        return None
+    prefix = mac.replace(":", "").replace("-", "").upper()[:6]
+    return table.get(prefix)
+
+
+def _resolve_hostnames(ips):
+    """Best-effort reverse-DNS for many devices at once, in parallel --
+    hostname_for's own 1.5s timeout is per-call, so resolving a whole LAN's
+    worth of devices sequentially could take N times as long; running them
+    concurrently keeps the total added time close to that same ~1.5s cap
+    regardless of device count. Returns {ip: hostname_or_None}."""
+    if not ips:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ips), 32)) as pool:
+        results = list(pool.map(hostname_for, ips))
+    return dict(zip(ips, results))
+
+
 def scan():
     """Run a fresh LAN scan, update the known-devices store, and best-effort
     Telegram-alert on any MAC seen for the first time ever. Returns
-    {"subnet", "devices": [{"mac","ip","first_seen","new"}], "new_count",
-    "scanned_at"} or {"error": "..."} if nmap/subnet detection isn't
-    available -- never raises."""
+    {"subnet", "devices": [{"mac","ip","vendor","hostname","first_seen",
+    "new"}], "new_count", "scanned_at"} or {"error": "..."} if nmap/subnet
+    detection isn't available -- never raises. `vendor` is a local, offline
+    OUI lookup; `hostname` is a best-effort parallel reverse-DNS lookup --
+    both are None when nothing resolves, never a hard failure."""
     if not NMAP_AVAILABLE:
         return {"error": "nmap isn't installed sir -- run: sudo apt install nmap"}
     subnet = _detect_subnet()
@@ -164,8 +225,18 @@ def scan():
         except Exception:
             pass
 
+    live_ips = [info["ip"] for mac, info in known.items() if mac in seen]
+    hostnames = _resolve_hostnames(live_ips)
+
     devices = [
-        {"mac": mac, "ip": info["ip"], "first_seen": info["first_seen"], "new": mac in new_macs}
+        {
+            "mac": mac,
+            "ip": info["ip"],
+            "vendor": _vendor_for(mac),
+            "hostname": hostnames.get(info["ip"]),
+            "first_seen": info["first_seen"],
+            "new": mac in new_macs,
+        }
         for mac, info in known.items() if mac in seen
     ]
     devices.sort(key=lambda d: [int(o) for o in d["ip"].split(".")])
@@ -207,11 +278,12 @@ def scan_ports(ip):
 
 
 def hostname_for(ip):
-    """Best-effort reverse-DNS/NetBIOS lookup for one device -- on-demand
-    only (not run automatically for every device on every scan, since a
-    resolver timeout per device would make an N-device scan take up to N
-    times as long). Returns the hostname string, or None if nothing
-    resolves within the short timeout."""
+    """Best-effort reverse-DNS/NetBIOS lookup for one device. Called both
+    on-demand (single IP, e.g. the HUD's per-device inspect) and by
+    scan()'s _resolve_hostnames, which fans this out across every device
+    in parallel so a resolver timeout per device doesn't turn an N-device
+    scan into an N-times-as-long one. Returns the hostname string, or None
+    if nothing resolves within the short timeout."""
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(1.5)
     try:

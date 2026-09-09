@@ -1645,17 +1645,29 @@ def check_internet_speed() -> str:
 def scan_network() -> str:
     """Scan the local network for connected devices (router-agnostic --
     works by pinging the local subnet directly from this PC, not by talking
-    to the router). Reports the total device count and flags anything new
-    since the last scan; new devices also trigger a Telegram alert
-    automatically in the background. Requires nmap installed."""
+    to the router). Returns the full device list -- IP, MAC, vendor (from
+    nmap's offline OUI database) and hostname (best-effort reverse-DNS)
+    when available -- not just a count, and flags anything new since the
+    last scan; new devices also trigger a Telegram alert automatically in
+    the background. Requires nmap installed."""
     result = network_watch.scan()
     if "error" in result:
         return result["error"]
-    if result["new_count"]:
-        new_ips = ", ".join(d["ip"] for d in result["devices"] if d["new"])
-        return (f"{len(result['devices'])} devices on your network sir -- "
-                f"{result['new_count']} new: {new_ips}.")
-    return f"{len(result['devices'])} devices on your network sir, nothing new."
+    if not result["devices"]:
+        return "No devices found on your network sir."
+
+    lines = []
+    for d in result["devices"]:
+        label = d["hostname"] or d["vendor"] or "unknown device"
+        detail = f"{d['ip']} ({d['mac']}, {label})"
+        if d["new"]:
+            detail += " [NEW]"
+        lines.append(detail)
+
+    header = f"{len(result['devices'])} devices on your network sir"
+    header += (f" -- {result['new_count']} new:" if result["new_count"]
+               else ", nothing new:")
+    return header + "\n" + "\n".join(lines)
 
 
 def deep_scan_device(ip: str) -> str:
