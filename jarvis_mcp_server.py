@@ -41,7 +41,7 @@ _TOOL_FUNCS = [
     tools.search_email, tools.read_email,
     tools.list_calendar_events, tools.update_calendar_event, tools.delete_calendar_event,
     tools.check_disk_space, tools.clean_disk, tools.check_system_health,
-    tools.system_power, tools.run_diagnostic_command, tools.run_admin_action,
+    tools.system_power, tools.restart_jarvis, tools.run_diagnostic_command, tools.run_admin_action,
     tools.propose_hardening_install,
     tools.get_nas_status, tools.export_folder_to_nas, tools.import_folder_from_nas,
     tools.list_nas_folder,

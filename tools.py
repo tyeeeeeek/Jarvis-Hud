@@ -1368,6 +1368,93 @@ def system_power(action: str, delay_minutes: float = 1) -> str:
         return f"I couldn't {action} the PC sir: {e}"
 
 
+# jarvis-backend.service is the one systemd --user unit this project's
+# README (Homelab section) documents Jarvis running as -- a fixed, named
+# constant so this can never become an arbitrary systemctl target, same
+# philosophy as _AI_SERVICES above.
+_JARVIS_SERVICE_UNIT = "jarvis-backend.service"
+
+
+def restart_jarvis(reason: str = "") -> str:
+    """Restart JUST Jarvis's own backend process/application instance --
+    NOT the whole PC (use system_power for that). This is the narrow
+    sibling of system_power: same JarvisAdmin approval gate, same
+    fail-closed behavior if that gate can't be reached, just scoped to
+    Jarvis's own process instead of the whole machine. Use this when the
+    user asks to restart "yourself"/"just Jarvis"/"the assistant" (not
+    the computer), or after a self_improve code change needs picking up.
+
+    Always exactly `systemctl --user restart jarvis-backend.service` --
+    the one named unit this project runs as when deployed as an always-on
+    Linux backend (see _JARVIS_SERVICE_UNIT above), never an arbitrary
+    unit or shell command. systemd's Restart=on-failure brings the fresh
+    process back up. Note this call is very likely issued from a short-lived
+    subprocess of Jarvis's own process tree (every tool call runs inside
+    a fresh jarvis_mcp_server.py instance spawned per request by brain.py
+    -- see that file's header), so it may not survive to see its own
+    subprocess finish: same fire-then-maybe-die property system_power's
+    own restart already has, and harmless here for the same reason --
+    once `systemctl restart` reaches the systemd --user manager (a
+    separate, persistent process), the restart proceeds regardless of
+    whether the process that asked for it is still alive to see it.
+
+    If jarvis-backend.service isn't installed/enabled (Jarvis was started
+    manually in a terminal, or this is Windows, which has no systemd),
+    this refuses rather than pretending to restart something it can't --
+    re-executing the calling process in place wouldn't actually restart
+    the real backend anyway, since that calling process is never Jarvis's
+    own long-running process, just a short-lived per-request helper.
+
+    Requires explicit JarvisAdmin yes/no approval first, exactly like
+    system_power's shutdown/restart -- fails closed (treats no answer or
+    no JarvisAdmin configured as a no) since this drops Jarvis's own
+    current voice/Telegram/tool session, even though it's far less
+    disruptive than restarting the whole PC. `reason` is optional context
+    included in the approval prompt (e.g. "picking up a self_improve code
+    change")."""
+    if IS_WINDOWS:
+        return ("I can't restart just my own backend on Windows sir -- there's no systemd here. "
+                "You'd need to restart the Jarvis process manually.")
+
+    if not jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        return ("JarvisAdmin isn't configured sir -- I won't restart my own backend without an "
+                "explicit approval gate. Set JARVIS_ADMIN_BOT_TOKEN in .env first.")
+
+    desc = "restart Jarvis's own backend process (not the whole PC)"
+    if reason:
+        desc += f" -- {reason}"
+    approved, status = jarvis_admin.request_approval(desc)
+    if not approved:
+        if status == "timeout":
+            return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not restarting."
+        return "Denied on JarvisAdmin sir -- I won't restart myself."
+
+    if not shutil.which("systemctl"):
+        return "I couldn't find systemctl on this machine sir -- can't restart my own backend this way."
+
+    try:
+        enabled = subprocess.run(["systemctl", "--user", "is-enabled", _JARVIS_SERVICE_UNIT],
+                                  capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        return f"I couldn't check my own service unit sir: {e}"
+    if enabled.returncode != 0:
+        return (f"{_JARVIS_SERVICE_UNIT} isn't installed/enabled sir -- I'm not running under it "
+                "right now, so I can't restart myself this way. Set it up as a systemd --user "
+                "service to enable this, or restart the process manually.")
+
+    try:
+        # This restart request kills the very cgroup this call is running
+        # inside of (see docstring) -- capture_output + a timeout here so
+        # this never hangs waiting on output from a process tree that's
+        # mid-teardown, but the request has already reached systemd well
+        # before that, so the actual restart isn't affected either way.
+        subprocess.run(["systemctl", "--user", "restart", _JARVIS_SERVICE_UNIT],
+                        capture_output=True, timeout=15)
+    except Exception:
+        pass
+    return "Restarting now, sir -- back in a few seconds."
+
+
 def run_admin_action(description: str, command: str) -> str:
     """Run ONE real system command that needs actual shell access -- an
     install (`sudo apt install ffmpeg`, an npm/pip package), a config
