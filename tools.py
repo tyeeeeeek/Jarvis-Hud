@@ -2058,6 +2058,118 @@ def run_rootkit_scan() -> str:
     return "Clean sir -- no rootkit warnings found."
 
 
+def run_chkrootkit_scan() -> str:
+    """Real, independent rootkit/backdoor scan (chkrootkit) -- a second
+    scanner alongside rkhunter with different signatures and detection
+    methods, so a rootkit tuned to evade one is less likely to evade both.
+    Needs root for almost everything it checks: tries passwordless sudo
+    first (works once the scoped NOPASSWD rule from the README is set up),
+    and returns a clear message -- never a hang -- if that isn't configured
+    yet. Takes a minute or two; safe to call anytime on demand."""
+    chkrootkit = shutil.which("chkrootkit")
+    if not chkrootkit:
+        return "chkrootkit isn't installed sir -- run: sudo apt install chkrootkit."
+    try:
+        r, needs_password = _sudo_n([chkrootkit], 180)
+    except subprocess.TimeoutExpired:
+        return "That scan took too long sir, I stopped waiting."
+    if needs_password or r is None:
+        return ("I need root for a real rootkit scan sir, and passwordless sudo isn't set up for "
+                "chkrootkit yet -- see the README's NOPASSWD setup.")
+    out = (r.stdout or "") + (r.stderr or "")
+    infected = [l.strip() for l in out.splitlines() if "INFECTED" in l]
+
+    global LAST_CHKROOTKIT_RESULT
+    LAST_CHKROOTKIT_RESULT = {"infected": infected}
+
+    if infected:
+        return f"{len(infected)} finding(s) sir:\n" + "\n".join(infected[:10])
+    return "Clean sir -- no rootkit indicators found by chkrootkit."
+
+
+def run_fail2ban_status() -> str:
+    """Real fail2ban status -- which jails are active and how many IPs are
+    currently banned in each, read straight from fail2ban-client (the
+    daemon's own control socket, root-only). Tries passwordless sudo first
+    (works once the scoped NOPASSWD rule from the README is set up), and
+    returns a clear message -- never a hang -- if that isn't configured
+    yet. Read-only: fail2ban does its actual banning on its own via its
+    systemd service regardless of whether Jarvis can see the status."""
+    fail2ban_client = shutil.which("fail2ban-client")
+    if not fail2ban_client:
+        return "fail2ban isn't installed sir -- run: sudo apt install fail2ban."
+    r, needs_password = _sudo_n([fail2ban_client, "status"], 15)
+    if needs_password or r is None:
+        return ("I need root to read fail2ban's status sir, and passwordless sudo isn't set up for "
+                "fail2ban-client yet -- see the README's NOPASSWD setup.")
+    jails = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if line.lower().startswith("- jail list:") and ":" in line:
+            jails = [j.strip() for j in line.split(":", 1)[1].split(",") if j.strip()]
+    if not jails:
+        return "fail2ban is running sir, but no jails are configured -- nothing being watched yet."
+    banned_total = 0
+    jail_lines = []
+    for jail in jails:
+        jr, jail_needs_password = _sudo_n([fail2ban_client, "status", jail], 15)
+        if jail_needs_password or jr is None:
+            jail_lines.append(f"{jail}: couldn't read (no NOPASSWD for 'status <jail>')")
+            continue
+        currently = 0
+        for line in (jr.stdout or "").splitlines():
+            line = line.strip()
+            if line.lower().startswith("- currently banned:"):
+                try:
+                    currently = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+        banned_total += currently
+        jail_lines.append(f"{jail}: {currently} banned")
+    return (f"{len(jails)} jail(s) active, {banned_total} IP(s) currently banned sir -- "
+            + "; ".join(jail_lines))
+
+
+def run_aide_check() -> str:
+    """Real file-integrity check (aide --check) against the baseline
+    database built at install time -- flags any file added, removed, or
+    modified outside that baseline (permissions/ownership changes too),
+    catching unexpected changes a signature-based rootkit scanner can
+    miss. Needs root to read every file and the database at /var/lib/aide:
+    tries passwordless sudo first (works once the scoped NOPASSWD rule
+    from the README is set up), and returns a clear message -- never a
+    hang -- if that isn't configured yet. Re-hashes the whole filesystem,
+    same as the initial baseline build (observed taking over an hour on
+    this machine) -- meant mainly to run unattended on a schedule, not
+    synchronously on demand; only call this directly if you're prepared
+    to wait a while."""
+    aide = shutil.which("aide")
+    if not aide:
+        return "aide isn't installed sir -- run: sudo apt install aide && sudo aideinit."
+    argv = [aide, "--config=/etc/aide/aide.conf", "--check"]
+    try:
+        r, needs_password = _sudo_n(argv, 4800)
+    except subprocess.TimeoutExpired:
+        return "That integrity check took too long sir, I stopped waiting."
+    if needs_password or r is None:
+        return ("I need root for a real integrity check sir, and passwordless sudo isn't set up for "
+                "aide yet -- see the README's NOPASSWD setup.")
+    out = (r.stdout or "") + (r.stderr or "")
+    # aide's exit code is a bitmask -- 0 means no changes; anything else
+    # means changes were found (or a real error, but we already handled
+    # the not-installed/no-sudo cases above, so treat non-zero as findings).
+    changed = r.returncode != 0
+
+    global LAST_AIDE_RESULT
+    LAST_AIDE_RESULT = {"changed": changed, "output": out[-2000:]}
+
+    if not changed:
+        return "Clean sir -- no unexpected file changes since the last baseline."
+    summary_start = out.find("Summary:")
+    summary = out[summary_start:summary_start + 500] if summary_start != -1 else out[-500:]
+    return f"File changes detected sir since the last baseline:\n{summary}"
+
+
 # Persists the last deep-scan signature that actually triggered a loud
 # JarSecurity alert, across restarts -- unlike run_security_check()'s
 # _security_watcher_thread (whose in-memory-only dedup is fine because
@@ -2279,11 +2391,14 @@ _SUSPICIOUS_EXEC_DIRS = ("/tmp/", "/dev/shm/", "/var/tmp/")
 LAST_SECURITY_RESULT = {}
 
 # Structured results of the most recent run_security_audit()/
-# run_rootkit_scan() calls -- same pattern as LAST_SECURITY_RESULT above,
-# so jarvis.py's deep-scan watcher thread can log real numbers instead of
-# re-parsing the human-readable return string.
+# run_rootkit_scan()/run_chkrootkit_scan()/run_aide_check() calls -- same
+# pattern as LAST_SECURITY_RESULT above, so jarvis.py's deep-scan watcher
+# thread can log real numbers instead of re-parsing the human-readable
+# return string.
 LAST_AUDIT_RESULT = {}
 LAST_ROOTKIT_RESULT = {}
+LAST_CHKROOTKIT_RESULT = {}
+LAST_AIDE_RESULT = {}
 
 
 def _log_security_event(entry):

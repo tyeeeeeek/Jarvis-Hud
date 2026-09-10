@@ -48,6 +48,7 @@ _TOOL_FUNCS = [
     tools.check_internet_speed, tools.scan_network,
     tools.deep_scan_device, tools.scan_file_for_malware, tools.get_disk_health,
     tools.test_lan_throughput, tools.get_live_system_snapshot, tools.run_security_audit, tools.run_rootkit_scan,
+    tools.run_chkrootkit_scan, tools.run_fail2ban_status, tools.run_aide_check,
     tools.run_security_check, tools.verify_ublock_origin, tools.install_ublock_origin,
     tools.verify_duckduckgo_privacy, tools.install_duckduckgo_privacy,
     tools.check_firmware_drivers, tools.scan_url_safety,
