@@ -29,13 +29,24 @@
 #   screen, Desktop app credentials.json).
 # ================================================================
 import base64
+import json
 import os
+import time
 from email.mime.text import MIMEText
 
+import requests
+
 HOME = os.path.expanduser("~")
+JARVIS_DIR = os.path.join(HOME, ".jarvis")
 
 CREDENTIALS_PATH = os.environ.get("GMAIL_CREDENTIALS_PATH", os.path.join(os.path.dirname(__file__), "credentials.json"))
 TOKEN_PATH = os.environ.get("GMAIL_TOKEN_PATH", os.path.join(os.path.dirname(__file__), "token.json"))
+# Tracks when the current refresh_token was actually issued (not just last
+# access-token refresh, which rewrites token.json roughly hourly) -- lets
+# _gmail_token_watcher_thread (jarvis.py) warn before Google's 7-day
+# Testing-mode refresh-token expiry, which token.json's own mtime can't
+# tell you since it's overwritten on every ordinary access-token refresh too.
+TOKEN_META_PATH = os.path.join(JARVIS_DIR, "gmail_token_meta.json")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -73,9 +84,79 @@ def _get_credentials():
             # fallback that would make draft/calendar calls fail mysteriously.
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
             creds = flow.run_local_server(port=0)
+            _mark_token_issued()
         with open(TOKEN_PATH, "w", encoding="utf-8") as f:
             f.write(creds.to_json())
     return creds
+
+
+def _mark_token_issued():
+    """Records that a fresh consent flow just ran (a brand-new
+    refresh_token, not just a refreshed access token) -- called only from
+    the fresh-consent branch of _get_credentials() above."""
+    os.makedirs(JARVIS_DIR, exist_ok=True)
+    with open(TOKEN_META_PATH, "w", encoding="utf-8") as f:
+        json.dump({"issued_at": time.time(), "alerted": False}, f)
+
+
+def token_expiry_status():
+    """Returns (issued_at, already_alerted). issued_at is None if no
+    fresh-consent has run since this tracking was added (e.g. an older
+    token.json predating this feature) -- callers should treat None as
+    "unknown, don't alert" rather than "expired"."""
+    try:
+        with open(TOKEN_META_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d.get("issued_at"), bool(d.get("alerted", False))
+    except Exception:
+        return None, False
+
+
+def mark_token_expiry_alerted():
+    """Best-effort dedup flag so _gmail_token_watcher_thread only warns
+    once per token cycle, and survives a jarvis.py restart."""
+    try:
+        with open(TOKEN_META_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        d = {}
+    d["alerted"] = True
+    os.makedirs(JARVIS_DIR, exist_ok=True)
+    with open(TOKEN_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+
+
+def revoke_and_disconnect():
+    """Emergency-only: best-effort SERVER-SIDE revoke of the current
+    refresh_token via Google's own revoke endpoint (so a stolen/compromised
+    token is dead immediately, not just locally forgotten), then deletes
+    token.json and the token-issued watermark so a future auth starts
+    completely clean. Only ever called from tools.trigger_lockdown() --
+    never during ordinary operation. Returns True if Google confirmed the
+    revoke, False otherwise (network failure, no token to revoke, etc --
+    the local files are removed either way, since "can't confirm the
+    server-side revoke" shouldn't block clearing the local copy)."""
+    revoked = False
+    try:
+        if os.path.exists(TOKEN_PATH):
+            with open(TOKEN_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            refresh_token = data.get("refresh_token")
+            if refresh_token:
+                r = requests.post("https://oauth2.googleapis.com/revoke",
+                                   params={"token": refresh_token}, timeout=10)
+                revoked = r.status_code == 200
+    except Exception:
+        pass
+    for path in (TOKEN_PATH, TOKEN_META_PATH):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    global _gmail_service, _calendar_service
+    _gmail_service = None
+    _calendar_service = None
+    return revoked
 
 
 def _gmail():

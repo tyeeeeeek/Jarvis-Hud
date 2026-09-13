@@ -84,6 +84,25 @@ def _client():
     return _app
 
 
+def disconnect():
+    """Emergency-only: clears the local MSAL token cache and deletes
+    token_outlook.json, forcing a full device-code re-auth next time. This
+    is NOT a server-side revoke -- a public client app has no safe,
+    app-scoped revoke call; Microsoft Graph's revokeSignInSessions needs
+    admin consent and kills every session for the whole account, not just
+    this app, so it's deliberately not used here. The cached refresh token
+    stays valid server-side until it naturally expires or the user revokes
+    it themselves (account.microsoft.com/security, or the Entra app's
+    portal). Only ever called from tools.trigger_lockdown()."""
+    global _app, _cache
+    try:
+        os.remove(TOKEN_PATH)
+    except OSError:
+        pass
+    _app = None
+    _cache = None
+
+
 def _get_token(interactive: bool = False):
     """Returns a valid access token, or None if not authenticated and
     `interactive` is False -- callers on a background thread (the mail
