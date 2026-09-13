@@ -1373,7 +1373,7 @@ def _email_command_thread():
     is open-ended "ask anything about my mail/calendar" Q&A and actions.
     See jarvis_email_bot.poll_thread()."""
     def on_command(body):
-        handle_command(body, acked=True, notify=jarvis_email_bot.send_message)
+        handle_command(body, acked=True, notify=jarvis_email_bot.send_message, default_provider="gmail")
     jarvis_email_bot.poll_thread(on_command, pipeline_stop)
 
 
@@ -1382,7 +1382,7 @@ def _outlook_command_thread():
     docstring), just its own dedicated bot/chat channel into the same full
     brain. See jarvis_outlook_bot.poll_thread()."""
     def on_command(body):
-        handle_command(body, acked=True, notify=jarvis_outlook_bot.send_message)
+        handle_command(body, acked=True, notify=jarvis_outlook_bot.send_message, default_provider="outlook")
     jarvis_outlook_bot.poll_thread(on_command, pipeline_stop)
 
 
@@ -1412,11 +1412,59 @@ def _email_watch_thread():
 
 
 # ================================================================ COMMAND DISPATCH
-def handle_command(command, acked=False, notify=None):
+_PROVIDER_CHANNEL_HINTS = {
+    "gmail": (
+        "This request came in through the JarvisEmail channel (Gmail/Google "
+        "Calendar specifically). If it involves email or a calendar and "
+        "doesn't explicitly name a different provider, use provider=\"gmail\" "
+        "for search_email/read_email/draft_email/list_calendar_events/"
+        "update_calendar_event/delete_calendar_event/create_calendar_event."
+    ),
+    "outlook": (
+        "This request came in through the JarvisOutlook channel (Outlook "
+        "mail/Outlook Calendar specifically -- Microsoft/Azure/Entra/Intune, "
+        "not Google). If it involves email or a calendar and doesn't "
+        "explicitly name a different provider, use provider=\"outlook\" for "
+        "search_email/read_email/draft_email/list_calendar_events/"
+        "update_calendar_event/delete_calendar_event/create_calendar_event -- "
+        "never default to gmail on this channel."
+    ),
+}
+
+_HUD_LONG_FORM_HINT = (
+    "This request came in through the phone HUD's camera Q&A -- the user is "
+    "looking at their phone screen (which shows your reply as text too, not "
+    "just hearing it) and typically has both hands free, often pointing the "
+    "camera at something they're actively working on. The usual ~40-word "
+    "spoken-reply guideline does not apply here -- longer answers are fine. "
+    "For a how-to, troubleshooting, or repair question specifically: don't "
+    "dump every step in one reply. Give the first step (or first couple, if "
+    "short) as a clear, numbered instruction, then stop and ask something "
+    "like \"let me know when you've done that\" or \"tell me what you see\" "
+    "so it becomes a real back-and-forth walkthrough instead of a wall of "
+    "instructions read out over their shoulder while their hands are busy."
+)
+
+
+def handle_command(command, acked=False, notify=None, default_provider=None, long_form=False):
     """notify, if given, is called with the final reply text in addition to
     speaking it aloud -- used to text an SMS-originated command's answer
     back, regardless of which channel (voice/typed/SMS) the command came
-    from."""
+    from.
+
+    default_provider: "gmail"/"outlook" when this command arrived on one of
+    the provider-specific bot channels (JarvisEmail/JarvisOutlook) -- every
+    email/calendar tool in tools.py defaults its own `provider` arg to
+    "gmail" when the brain doesn't pass one explicitly, so without this a
+    request phrased without a provider name (e.g. "what's on my calendar
+    this week") silently runs against Gmail even when asked over the
+    Outlook-dedicated channel. None (voice/SMS/main Telegram bridge) keeps
+    the old behavior -- no steer, tools.py's own gmail default applies.
+
+    long_form: True for the phone HUD's camera Q&A (see dashboard_server.py's
+    _hud_ask) -- relaxes PERSONA's normal terse-spoken-reply guideline and
+    nudges multi-step how-to/troubleshooting questions toward one step at a
+    time instead of a single long dump. False everywhere else, unchanged."""
     # Checked before _command_lock on purpose: if a job (self_improve /
     # hire_employee, which can run for minutes) is in flight, the thread that
     # started it is holding _command_lock for the whole duration, so a
@@ -1493,8 +1541,11 @@ def handle_command(command, acked=False, notify=None):
             nonlocal job_record
             job_record = _register_active_job(proc)
 
+        channel_hint_parts = [h for h in (_PROVIDER_CHANNEL_HINTS.get(default_provider),
+                                           _HUD_LONG_FORM_HINT if long_form else None) if h]
         reply = brain.run_agent(command, on_activity=_on_brain_activity,
-                                 on_creation=_on_brain_creation, on_process=_on_process)
+                                 on_creation=_on_brain_creation, on_process=_on_process,
+                                 channel_hint="\n\n".join(channel_hint_parts) if channel_hint_parts else None)
         if job_record is not None:
             was_cancelled = job_record["cancelled"]
             _clear_active_job(job_record)

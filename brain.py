@@ -134,8 +134,14 @@ def _caption_for(name, args, meta_display_name):
     return short.replace("_", " ").capitalize()
 
 
-def run_agent(command, on_activity=None, on_creation=None, on_process=None):
+def run_agent(command, on_activity=None, on_creation=None, on_process=None, channel_hint=None):
     """Run one voice command through the Claude tool-calling brain.
+
+    channel_hint: an optional plain-text line of context about which
+    dedicated bot channel this request arrived on (see jarvis.py's
+    handle_command `default_provider` param) -- e.g. told apart from
+    `command` itself so a provider steer never gets logged/recalled as
+    something the user actually said.
 
     on_activity(text): called as soon as each tool call starts (before it
         finishes), for live HUD feedback.
@@ -183,6 +189,8 @@ def run_agent(command, on_activity=None, on_creation=None, on_process=None):
         pass
 
     parts = [now_line]
+    if channel_hint:
+        parts.append(channel_hint)
     if memory_block:
         parts.append(memory_block)
     if history:
