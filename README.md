@@ -534,11 +534,18 @@ above. **No password is stored anywhere, ever** — the OS itself grants
 passwordless root for these three exact commands only; everything else on this
 account still needs a real password same as before:
 
+Also covered by this same rule file: `ufw status`, which lets
+`run_security_check()`'s port scan tell "bound to 0.0.0.0 but firewalled to
+Tailscale-only" (e.g. Rustdesk) apart from an actually-exposed port, instead
+of reporting the former as exposed too for lack of a way to check. Read-only
+— never touches or changes any firewall rule.
+
 ```
 sudo tee /etc/sudoers.d/jarvis-diagnostics <<'EOF'
 tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/smartctl -a /dev/*
 tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/rkhunter --check --sk --nocolors
 tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/lynis audit system --quick --no-colors --no-log --report-file *
+tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/ufw status
 EOF
 sudo chmod 0440 /etc/sudoers.d/jarvis-diagnostics
 sudo visudo -c   # confirm it says "parsed OK"
@@ -549,6 +556,31 @@ Jarvis-decided commands — there's no way to scope a NOPASSWD rule to "whatever
 command Jarvis picks" without it being equivalent to disabling sudo protection
 for this account entirely, so it still requires a real password, or the
 JarvisAdmin approval gate plus a manually-granted sudo session, same as before).
+
+### JarSecurity auto-remediation (fixes real exposed ports, not just reports them)
+
+`run_security_check()` finds exposed ports (services reachable by your whole
+LAN, not just this PC or Tailscale) and, for a small curated list of ones it
+actually knows how to safely fix — see `_PORT_REMEDIATIONS` in `tools.py` —
+asks for one-tap JarvisAdmin approval and then *actually applies the fix*
+through `scripts/jarvis_security_fixes.sh`, a fixed, auditable script with
+exactly two named actions (rebind Ollama to loopback, stop/disable a leftover
+iperf3 server). Nothing else is in scope — an exposed port with no entry in
+that table is only ever reported, never touched. Without this NOPASSWD rule
+the approval still fires, but the fix step fails with a clear "I need root and
+passwordless sudo isn't set up" message instead of applying anything:
+
+```
+sudo tee /etc/sudoers.d/jarvis-security-fixes <<EOF
+tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/bash $(pwd)/scripts/jarvis_security_fixes.sh fix_exposed_ollama
+tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/bash $(pwd)/scripts/jarvis_security_fixes.sh fix_exposed_iperf3
+EOF
+sudo chmod 0440 /etc/sudoers.d/jarvis-security-fixes
+sudo visudo -c   # confirm it says "parsed OK"
+```
+
+Run that from this project's own directory so `$(pwd)` resolves to the right
+path.
 
 ### Require approval first (JarvisAdmin bot)
 

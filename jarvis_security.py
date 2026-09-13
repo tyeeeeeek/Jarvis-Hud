@@ -63,15 +63,17 @@ def send_summary(result_text: str) -> bool:
     of whether anything was wrong -- a routine security status update. Tone
     is the blunt, no-nonsense watchdog: it reports the findings, not
     feelings."""
-    return _send(f"JARSECURITY SWEEP — {result_text}")
+    return _send(f"JARSECURITY SWEEP\n{result_text}")
 
 
 def send_alert(result_text: str) -> bool:
     """Sent immediately the moment run_security_check() flags a suspicious
     process or a brand-new device on the LAN, instead of waiting for the
     next scheduled summary. Tone stays blunt -- no hedging on something that
-    actually needs a look."""
-    return _send(f"⚠️ JARSECURITY ALERT — look at this now: {result_text}")
+    actually needs a look. result_text already leads with its own "NEEDS
+    ATTENTION:" section (see run_security_check), so this just adds the
+    urgency marker, not a second header."""
+    return _send(f"⚠️ JARSECURITY ALERT\n{result_text}")
 
 
 def send_test_message() -> bool:

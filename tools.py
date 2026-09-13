@@ -1519,15 +1519,17 @@ _HARDENING_INSTALLS = {
     "fail2ban": "sudo apt-get install -y fail2ban",
     "chkrootkit": "sudo apt-get install -y chkrootkit",
     "aide": "sudo apt-get install -y aide && sudo aideinit",
+    "gitleaks": "sudo apt-get install -y gitleaks",
 }
 
 
 def propose_hardening_install(tool_name: str) -> str:
     """Propose installing one vetted homelab-security tool -- fail2ban
     (bans IPs hammering exposed services), chkrootkit (a second, independent
-    rootkit scanner alongside rkhunter), or aide (file-integrity
-    monitoring). `tool_name` must be one of those three; anything else is
-    refused outright, never passed through. Routes through the existing
+    rootkit scanner alongside rkhunter), aide (file-integrity monitoring),
+    or gitleaks (the secret scanner _check_leaked_secrets uses to catch
+    committed API keys/tokens). `tool_name` must be one of those four;
+    anything else is refused outright, never passed through. Routes through the existing
     run_admin_action() -- same JarvisAdmin Telegram yes/no gate as any other
     real system action, fails closed if that bot isn't configured. This
     function never constructs a command itself, only looks one up from the
@@ -2035,14 +2037,17 @@ def run_rootkit_scan() -> str:
     database. Needs root for almost everything it does: tries passwordless
     sudo first (works once the scoped NOPASSWD rule from the README is set
     up), and returns a clear message -- never a hang -- if that isn't
-    configured yet. Can take a couple of minutes; safe to call anytime on
-    demand."""
+    configured yet. Observed taking longer than 180s on this machine (three
+    straight on-demand timeouts the same night this tool got fail2ban/
+    chkrootkit/aide siblings) -- now matches run_security_audit's 600s
+    lynis timeout instead of its own shorter one. Can take several
+    minutes; safe to call anytime on demand."""
     rkhunter = shutil.which("rkhunter")
     if not rkhunter:
         return "rkhunter isn't installed sir -- run: sudo apt install rkhunter."
     argv = [rkhunter, "--check", "--sk", "--nocolors"]
     try:
-        r, needs_password = _sudo_n(argv, 180)
+        r, needs_password = _sudo_n(argv, 600)
     except subprocess.TimeoutExpired:
         return "That scan took too long sir, I stopped waiting."
     if needs_password or r is None:
@@ -2208,20 +2213,26 @@ def log_deep_scan_result() -> dict:
     4-hour sweep entries (security_status_report() filters on the
     "deep_scan" flag to report them separately). Called once daily by
     jarvis.py's deep-scan watcher thread, after both scans have run.
-    Returns {"critical", "should_alert", "summary"} -- critical means a
-    REAL lynis warning (not a suggestion) or any rkhunter warning, not
-    just "the scan ran successfully"; should_alert is critical AND the
-    exact set of warnings has changed since the last time this actually
-    alerted (persisted to DEEP_SCAN_ALERT_STATE_PATH), so an unresolved
-    finding that's still there tomorrow -- or after an unrelated service
-    restart today -- doesn't re-fire the loud JarSecurity alert path every
-    time; the caller should still send a quiet summary either way."""
+    Returns {"critical", "should_alert", "summary"} -- critical means
+    rkhunter (an actual rootkit/backdoor scanner) found something, which is
+    a genuine "look at this now" signal. Lynis warnings are real findings
+    worth knowing about but are hardening best-practice notes (e.g. "your
+    SMTP banner reveals your OS version"), not evidence of compromise, so
+    they're reported plainly but never trigger the loud, urgent alert path
+    on their own -- this is what stops a single low-severity lynis note from
+    reading exactly as scary as an actual rootkit hit. should_alert is
+    critical AND the exact set of rkhunter warnings has changed since the
+    last time this actually alerted (persisted to
+    DEEP_SCAN_ALERT_STATE_PATH), so an unresolved finding that's still
+    there tomorrow -- or after an unrelated service restart today --
+    doesn't re-fire the loud JarSecurity alert path every time; the caller
+    should still send a quiet summary either way."""
     lynis_warnings = LAST_AUDIT_RESULT.get("warnings") or []
     lynis_suggestions = LAST_AUDIT_RESULT.get("suggestions") or []
     hardening_index = LAST_AUDIT_RESULT.get("hardening_index")
     rkhunter_warnings = LAST_ROOTKIT_RESULT.get("warnings") or []
 
-    critical = bool(lynis_warnings) or bool(rkhunter_warnings)
+    critical = bool(rkhunter_warnings)
     _log_security_event({
         "deep_scan": True,
         "lynis_hardening_index": hardening_index,
@@ -2233,19 +2244,21 @@ def log_deep_scan_result() -> dict:
 
     should_alert = False
     if critical:
-        signature = [sorted(lynis_warnings), sorted(rkhunter_warnings)]
+        signature = sorted(rkhunter_warnings)
         if signature != _load_deep_scan_alert_signature():
             should_alert = True
             _save_deep_scan_alert_signature(signature)
     else:
         _save_deep_scan_alert_signature(None)
 
-    summary = (f"deep scan: hardening index {hardening_index or '–'}/100, "
-               f"{len(lynis_warnings)} lynis warning(s), {len(rkhunter_warnings)} rkhunter warning(s)")
-    if lynis_warnings:
-        summary += "\nlynis: " + "; ".join(lynis_warnings[:5])
-    if rkhunter_warnings:
-        summary += "\nrkhunter: " + "; ".join(rkhunter_warnings[:5])
+    if critical:
+        summary = f"ACTUAL ROOTKIT SCANNER FINDING sir, this needs a look: " + "; ".join(rkhunter_warnings[:10])
+    else:
+        summary = f"Nothing urgent from the deep scan. Hardening score {hardening_index or '–'}/100 (lynis)."
+        if lynis_warnings:
+            summary += f" {len(lynis_warnings)} minor hardening note(s), not urgent: " + "; ".join(lynis_warnings[:5])
+        if lynis_suggestions:
+            summary += f" Plus {len(lynis_suggestions)} optional hardening suggestion(s) -- ask me to list them anytime."
     return {"critical": critical, "should_alert": should_alert, "summary": summary}
 
 
@@ -2504,6 +2517,73 @@ def _classify_bind_scope(addr, tailscale_ip=None):
     return "exposed"
 
 
+def _parse_ufw_rules(out):
+    """Parses `ufw status`'s plain-text table into a list of
+    {port_start, port_end, proto, action, from_tailscale, from_anywhere}
+    dicts. Ignores rules for other apps/ports -- run_security_check only
+    ever asks this "is THIS port covered", never dumps the whole table."""
+    rules = []
+    line_re = re.compile(
+        r"^(\d+)(?::(\d+))?/(tcp|udp)(?:\s+\(v6\))?\s+(ALLOW|DENY)\s+IN\s+(.+?)\s*$"
+    )
+    for line in out.splitlines():
+        m = line_re.match(line.strip())
+        if not m:
+            continue
+        start, end, proto, action, src = m.groups()
+        rules.append({
+            "port_start": int(start), "port_end": int(end) if end else int(start),
+            "proto": proto, "action": action,
+            "from_tailscale": src.startswith("100.64.0.0/10"),
+            "from_anywhere": src.startswith("Anywhere"),
+        })
+    return rules
+
+
+def _ufw_status_rules():
+    """Live `ufw` rule table, or None if ufw isn't installed/active or we
+    don't have passwordless sudo for it (see README's NOPASSWD section --
+    add `tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/ufw status` the same
+    way the smartctl/lynis/rkhunter rules are added to enable this check).
+    None means "can't verify" -- callers must treat that as NOT restricted,
+    same fail-safe-to-exposed default _classify_bind_scope already uses,
+    never as "assume it's fine"."""
+    ufw = shutil.which("ufw") or "/usr/sbin/ufw"
+    r, needs_password = _sudo_n([ufw, "status"], 10)
+    if r is None or needs_password or r.returncode != 0:
+        return None
+    if "Status: active" not in r.stdout:
+        return None
+    return _parse_ufw_rules(r.stdout)
+
+
+def _ufw_restricts_to_tailscale(port, proto, rules):
+    """True only if `rules` contains BOTH an ALLOW-from-Tailscale rule and
+    a DENY-from-Anywhere rule covering this exact port+proto -- a lone
+    ALLOW rule proves nothing since ufw is first-match: a broader ALLOW
+    elsewhere (or no matching DENY at all under a non-default 'allow
+    incoming' policy) would still let outside traffic through. Requiring
+    both, in the order ufw actually needs them in, is what makes this the
+    same guarantee a human reading `ufw status` would rely on -- see the
+    Rustdesk false-positive this was written for (bound to 0.0.0.0, but
+    ports 21115-21119 were already ALLOW-tailscale + DENY-anywhere)."""
+    if not rules:
+        return False
+    try:
+        port_n = int(port)
+    except (TypeError, ValueError):
+        return False
+    has_allow = has_deny = False
+    for rule in rules:
+        if rule["proto"] != proto or not (rule["port_start"] <= port_n <= rule["port_end"]):
+            continue
+        if rule["action"] == "ALLOW" and rule["from_tailscale"]:
+            has_allow = True
+        elif rule["action"] == "DENY" and rule["from_anywhere"]:
+            has_deny = True
+    return has_allow and has_deny
+
+
 def _open_listening_ports():
     """Structured list of {addr, port, proto, scope, process} for every
     currently-LISTENing local socket, via the same read-only diagnostic
@@ -2552,23 +2632,170 @@ def _open_listening_ports():
             "scope": _classify_bind_scope(addr, tailscale_ip),
             "process": process,
         })
+
+    # A socket bound to 0.0.0.0 reads as "exposed" from the bind address
+    # alone, but ufw can already be restricting that exact port to
+    # Tailscale-only underneath it (e.g. Rustdesk, which always binds
+    # broadly regardless of firewall config) -- reclassify those so they
+    # don't get reported/alerted-on as if they're actually reachable from
+    # the LAN. _ufw_status_rules() returns None (never an empty list used
+    # as "nothing to restrict") when it can't verify, so an exposed port
+    # only ever gets downgraded on positive proof, never by default.
+    if any(p["scope"] == "exposed" for p in ports):
+        ufw_rules = _ufw_status_rules()
+        if ufw_rules:
+            for p in ports:
+                if p["scope"] != "exposed":
+                    continue
+                proto = p["proto"].rstrip("6")  # ss may report tcp6/udp6; ufw rules are proto-agnostic of IP version
+                if _ufw_restricts_to_tailscale(p["port"], proto, ufw_rules):
+                    p["scope"] = "tailscale"
+
     return ports
 
 
+# Best-effort plain-English service name for common ports -- purely for
+# wording an alert a non-expert can act on ("port 11434 is your Ollama AI
+# server"), never used for any security decision. Falls back to the raw
+# process name, then "unrecognized service", when a port isn't listed here.
+_KNOWN_PORT_SERVICES = {
+    "22": "SSH (remote terminal access)", "80": "a web server (HTTP)",
+    "443": "a web server (HTTPS)", "25": "a mail server (SMTP)",
+    "631": "CUPS (printer sharing)", "53": "DNS",
+    "3000": "Grafana dashboard", "3001": "Uptime Kuma dashboard",
+    "9090": "Prometheus", "9100": "Prometheus node exporter",
+    "8767": "the Jarvis phone dashboard", "8766": "Jarvis's local widget API",
+    "8765": "the Jarvis HUD's WebSocket link",
+    "11434": "your Ollama AI server", "5201": "an iperf3 network-speed-test server",
+    "5678": "n8n automation", "8080": "a web dashboard (homepage-style)",
+    "9443": "Portainer", "5939": "TeamViewer", "9000": "Portainer/Watchtower",
+    "8082": "a web dashboard", "8000": "a web server", "8222": "a web dashboard",
+    "35252": "n8n", "3010": "a web dashboard", "3020": "a web dashboard",
+}
+
+
+def _port_label(p):
+    """Best-effort plain-English name for one port entry (see
+    _KNOWN_PORT_SERVICES) -- falls back to the raw process name, then
+    "unrecognized service"."""
+    return _KNOWN_PORT_SERVICES.get(p["port"]) or p["process"] or "an unrecognized service"
+
+
 def _format_port_detail(ports):
-    """Human-readable port table -- one source of truth shared by the
+    """Plain-English port summary -- one source of truth shared by the
     Telegram alert text (run_security_check) and JarSecurity's grounded
     chat report (security_status_report), so "what ports are open" gets
-    the same real detail either way instead of two different summaries."""
+    the same real, named detail either way instead of raw addr/proto
+    notation nobody can act on."""
     if not ports:
         return "no listening ports found"
     exposed = [p for p in ports if p["scope"] == "exposed"]
-    lines = []
-    for p in sorted(ports, key=lambda p: (p["scope"] != "exposed", p["addr"])):
-        proc = f" ({p['process']})" if p["process"] else ""
-        lines.append(f"  {p['addr']}/{p['proto']} -- {p['scope']}{proc}")
-    header = f"{len(ports)} listening port(s), {len(exposed)} exposed (LAN/WAN-reachable)"
+    if not exposed:
+        return f"{len(ports)} listening port(s), all restricted to this PC itself or your Tailscale network -- nothing reachable from your regular LAN or the internet."
+    lines = [f"  - port {p['port']} ({_port_label(p)}) -- reachable by any device on your network"
+              for p in sorted(exposed, key=lambda p: p["port"])]
+    header = (f"{len(exposed)} of your {len(ports)} listening ports are reachable by any device on "
+              f"your regular network (not just this PC or your Tailscale devices)")
     return header + ":\n" + "\n".join(lines)
+
+
+# Curated, narrow remediation table for exposed ports JarSecurity actually
+# knows how to safely fix -- deliberately NOT a generic "close any exposed
+# port" hook (that could break something we don't understand). An exposed
+# port with no entry here is only ever reported, never touched. Each fix
+# runs through scripts/jarvis_security_fixes.sh as root (see that script's
+# header and README.md's NOPASSWD setup) -- a fixed, auditable script, not
+# an arbitrary command built from data.
+_PORT_REMEDIATIONS = {
+    "11434": {
+        "label": "your Ollama AI server",
+        "risk": ("it's bound to 0.0.0.0, so any device on your network -- not just this PC or your "
+                 "Tailscale devices -- can send it requests"),
+        "fix_keyword": "fix_exposed_ollama",
+        "fix_plan": ("rebind it to 127.0.0.1 (this PC only) and restart it -- everything in Jarvis that "
+                     "talks to it already uses localhost, so nothing breaks"),
+    },
+    "5201": {
+        "label": "an iperf3 network-speed-test server",
+        "risk": "it's a leftover always-on speed-test server with no authentication, reachable by any device on your network",
+        "fix_keyword": "fix_exposed_iperf3",
+        "fix_plan": "stop it and turn off its auto-start -- you can start it again anytime with a single command when you actually want to run a speed test",
+    },
+}
+
+_SECURITY_FIX_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "jarvis_security_fixes.sh")
+_REMEDIATION_STATE_PATH = os.path.join(JARVIS_DIR, "security_remediation_state.json")
+
+
+def _load_remediation_state():
+    try:
+        with open(_REMEDIATION_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_remediation_state(state):
+    _ensure_jarvis_dir()
+    try:
+        with open(_REMEDIATION_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
+def _run_security_fix_script(keyword: str, timeout: int = 20):
+    """Runs one fixed, named remediation from scripts/jarvis_security_fixes.sh
+    as root via non-interactive sudo (see _sudo_n) -- never a hang on a
+    missing password, never an arbitrary command. Returns (ok, detail)."""
+    r, needs_password = _sudo_n(["bash", _SECURITY_FIX_SCRIPT, keyword], timeout)
+    if needs_password or r is None:
+        return False, ("I need root for that fix and passwordless sudo isn't set up for it yet sir -- "
+                        "see README.md's JarSecurity auto-remediation setup.")
+    if r.returncode != 0:
+        return False, f"the fix script failed (exit {r.returncode}): {(r.stderr or r.stdout or '').strip()[:300]}"
+    return True, "done"
+
+
+def _remediate_exposed_port(port_entry):
+    """For one exposed port with a known, curated fix (see
+    _PORT_REMEDIATIONS): asks JarvisAdmin for one-tap approval (skipped if
+    this exact port was already declined and nothing's changed since), runs
+    the fix, and re-checks the actual listening ports afterward to confirm
+    it worked before claiming success -- never just "fixed it" on faith.
+    Returns a dict describing what was found / risked / attempted / the
+    real outcome, or None if there's no known fix or the user already
+    declined this one. Persists declined/resolved state to
+    ~/.jarvis/security_remediation_state.json so a decline doesn't get
+    re-asked every 4-hour sweep forever."""
+    port = port_entry["port"]
+    remedy = _PORT_REMEDIATIONS.get(port)
+    if not remedy:
+        return None
+    state = _load_remediation_state()
+    if state.get(port, {}).get("declined"):
+        return None
+    if not jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        return None
+    approved, _status = jarvis_admin.request_approval(
+        f"fix an exposed port JarSecurity found: {remedy['label']} on port {port} is reachable by your "
+        f"whole network. Proposed fix: {remedy['fix_plan']}")
+    if not approved:
+        state[port] = {"declined": True}
+        _save_remediation_state(state)
+        return {"port": port, "label": remedy["label"], "risk": remedy["risk"],
+                "attempted": remedy["fix_plan"], "ok": False, "detail": "you said no, so I left it alone -- ask me anytime to revisit it"}
+    ok, detail = _run_security_fix_script(remedy["fix_keyword"])
+    if ok:
+        ports_after = _open_listening_ports()
+        still_exposed = any(p["port"] == port and p["scope"] == "exposed" for p in ports_after)
+        if still_exposed:
+            ok, detail = False, "ran the fix but the port is still exposed after re-checking -- needs a manual look"
+    if ok:
+        state.pop(port, None)
+    _save_remediation_state(state)
+    return {"port": port, "label": remedy["label"], "risk": remedy["risk"],
+            "attempted": remedy["fix_plan"], "ok": ok, "detail": detail}
 
 
 def _check_firmware_and_drivers():
@@ -2668,19 +2895,23 @@ def _check_dependency_vulnerabilities():
     Checks this project's actual installed Python packages (via
     `sys.executable -m pip_audit`, so it's always the same interpreter/venv
     Jarvis itself runs in) and its Node dependencies (`npm audit`, in this
-    project's own directory). Returns (summary_text, flagged)."""
+    project's own directory). Returns (summary_text, flagged, package_names)
+    -- package_names is the actual flagged package list, so the alert can
+    name them instead of just giving a count."""
     parts = []
     flagged = False
+    packages = []
 
     try:
         proc = subprocess.run([sys.executable, "-m", "pip_audit", "--format", "json"],
                                capture_output=True, text=True, timeout=90)
         if proc.stdout.strip():
             data = json.loads(proc.stdout)
-            vulns = [v for pkg in data.get("dependencies", []) for v in (pkg.get("vulns") or [])]
-            if vulns:
+            vuln_pkgs = [pkg["name"] for pkg in data.get("dependencies", []) if pkg.get("vulns")]
+            if vuln_pkgs:
                 flagged = True
-                parts.append(f"pip: {len(vulns)} known vulnerabilit{'y' if len(vulns) == 1 else 'ies'}")
+                packages.extend(f"{name} (Python)" for name in vuln_pkgs)
+                parts.append(f"pip: {', '.join(vuln_pkgs)}")
             else:
                 parts.append("pip: clean")
         else:
@@ -2697,10 +2928,12 @@ def _check_dependency_vulnerabilities():
             proc = subprocess.run([npm_bin, "audit", "--omit=dev", "--json"],
                                    cwd=project_dir, capture_output=True, text=True, timeout=60)
             data = json.loads(proc.stdout) if proc.stdout.strip() else {}
-            total = (data.get("metadata", {}) or {}).get("vulnerabilities", {}).get("total", 0)
-            if total:
+            vulns = data.get("vulnerabilities", {}) or {}
+            names = sorted(vulns.keys())
+            if names:
                 flagged = True
-                parts.append(f"npm: {total} known vulnerabilit{'y' if total == 1 else 'ies'}")
+                packages.extend(f"{name} (npm)" for name in names)
+                parts.append(f"npm: {', '.join(names)}")
             else:
                 parts.append("npm: clean")
         except Exception as e:
@@ -2708,7 +2941,83 @@ def _check_dependency_vulnerabilities():
     else:
         parts.append("npm: unavailable -- npm not found")
 
-    return "; ".join(parts), flagged
+    return "; ".join(parts), flagged, packages
+
+
+_GITLEAKS_SINCE_SHA_KEY = "gitleaks_last_scanned_sha"
+
+
+def _check_leaked_secrets():
+    """Read-only scan for API keys/tokens/credentials accidentally
+    committed to THIS project's own git history -- same report-only
+    philosophy as _check_dependency_vulnerabilities, using gitleaks (a
+    well-established open-source secret scanner) against real committed
+    content only, via `git log`. Never touches the working tree, so
+    .env/credentials.json/token*.json (gitignored on purpose, see
+    .gitignore) are never read by this -- only what's actually committed
+    matters here, since that's the only way a secret could ship (e.g. via
+    an autonomous self_improve commit).
+
+    Only scans commits since the last successful scan (watermark in
+    tools._get_state(), key 'gitleaks_last_scanned_sha') so a once-flagged
+    secret doesn't re-alert on every 4-hour sweep forever, and a burst of
+    several self_improve commits between sweeps is still fully covered.
+    First run ever scans just HEAD, not this repo's full history, to
+    avoid a one-time flood of old/already-rotated matches.
+
+    Returns (summary_text, flagged, findings) -- findings is a list of
+    short "rule in file (commit abc1234)" strings so an alert can name the
+    actual file/commit, not just a count."""
+    gitleaks_bin = shutil.which("gitleaks")
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    if not gitleaks_bin:
+        return "gitleaks not installed (sudo apt install gitleaks) -- secret scanning skipped", False, []
+
+    last_sha = _get_state().get(_GITLEAKS_SINCE_SHA_KEY)
+    log_opts = f"{last_sha}..HEAD" if last_sha else "-1"
+
+    # gitleaks' --report-path takes a real file path, NOT "-" for stdout
+    # (that writes a literal file named "-") -- verified directly against
+    # the installed binary before relying on this, so a real tempfile is
+    # required here, not a stdout-capture shortcut.
+    report_fd, report_path = tempfile.mkstemp(suffix=".json", prefix="jarvis-gitleaks-")
+    os.close(report_fd)
+    try:
+        subprocess.run(
+            [gitleaks_bin, "detect", "--source", project_dir, "--log-opts", log_opts,
+             "--report-format", "json", "--report-path", report_path, "--exit-code", "0", "--no-banner"],
+            capture_output=True, text=True, timeout=60, cwd=project_dir,
+        )
+        with open(report_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        findings_raw = json.loads(content) if content else []
+    except Exception as e:
+        return f"gitleaks scan failed ({e})", False, []
+    finally:
+        try:
+            os.remove(report_path)
+        except OSError:
+            pass
+
+    # Advance the watermark to current HEAD regardless of findings, so the
+    # next sweep only looks at what's new -- a scan failure above returns
+    # early without reaching here, so a broken scan never silently skips
+    # past commits it never actually checked.
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                               cwd=project_dir, timeout=10).stdout.strip()
+        if head:
+            _set_state(_GITLEAKS_SINCE_SHA_KEY, head)
+    except Exception:
+        pass
+
+    if findings_raw:
+        findings = [
+            f"{f.get('RuleID', 'secret')} in {f.get('File', '?')} (commit {f.get('Commit', '?')[:8]})"
+            for f in findings_raw[:5]
+        ]
+        return f"{len(findings_raw)} possible secret(s) committed: " + "; ".join(findings), True, findings
+    return "clean -- no secrets found in recently committed code", False, []
 
 
 def run_security_check() -> str:
@@ -2719,13 +3028,22 @@ def run_security_check() -> str:
     (flagging brand-new devices as possible intruders), flags outdated
     device firmware/drivers (see check_firmware_drivers), flags known
     vulnerabilities in this project's own Python/Node dependencies (pip-audit
-    + npm audit), refreshes the local malicious-link blocklist used by
+    + npm audit), flags API keys/tokens accidentally committed to this
+    project's own git history since the last sweep (gitleaks -- see
+    _check_leaked_secrets), pulls today's Pi-hole stats and flags it if
+    blocking is off (see _check_pihole_status), refreshes the local malicious-link blocklist used by
     open_website/search_web/scan_url_safety, and verifies -- installing if
     missing -- each vetted browser security/privacy extension (uBlock Origin
     Lite, DuckDuckGo Privacy Essentials) in the dedicated Jarvis browser
-    window. Every run is logged to ~/.jarvis/security_log.jsonl. Safe to
-    call anytime on demand; also runs automatically in the background on a
-    fixed schedule."""
+    window. For any exposed port with a known, curated fix (see
+    _PORT_REMEDIATIONS), asks for one-tap JarvisAdmin approval and -- if
+    approved -- actually applies the fix and confirms it worked, rather than
+    just reporting it. The returned text always separates genuinely
+    actionable findings ("NEEDS ATTENTION") from routine/FYI ones, in plain
+    language naming the actual port/package/device involved, not just a
+    count. Every run is logged to ~/.jarvis/security_log.jsonl. Safe to call
+    anytime on demand; also runs automatically in the background on a fixed
+    schedule."""
     global LAST_SECURITY_RESULT
     ports = _open_listening_ports()
     suspicious = _find_suspicious_processes()
@@ -2737,7 +3055,9 @@ def run_security_check() -> str:
     new_device_list = [d for d in net.get("devices", []) if d.get("new")] if not net_error else []
 
     firmware_note, firmware_flagged = _check_firmware_and_drivers()
-    dependency_note, dependency_flagged = _check_dependency_vulnerabilities()
+    dependency_note, dependency_flagged, dependency_packages = _check_dependency_vulnerabilities()
+    secrets_note, secrets_flagged, secrets_findings = _check_leaked_secrets()
+    pihole_note, pihole_flagged = _check_pihole_status()
 
     blocklist_result = refresh_threat_blocklist()
     if blocklist_result.get("ok"):
@@ -2766,45 +3086,105 @@ def run_security_check() -> str:
         ddg_summary = "DuckDuckGo Privacy Essentials unavailable -- browser control module isn't available"
 
     exposed_ports = [p for p in ports if p["scope"] == "exposed"]
-    critical = bool(suspicious) or new_count > 0 or dependency_flagged or bool(exposed_ports)
 
-    summary_parts = [f"{len(ports)} listening port{'s' if len(ports) != 1 else ''}"
-                      + (f", {len(exposed_ports)} EXPOSED (LAN/WAN-reachable)" if exposed_ports else ", none exposed")]
+    # Attempt a real, curated fix for every exposed port we actually know how
+    # to safely fix (see _PORT_REMEDIATIONS) -- one-tap JarvisAdmin approval,
+    # then a real systemctl-level change, then a re-check to confirm it
+    # actually worked. Unknown ports (no entry in that table) are only ever
+    # reported below, never touched.
+    remediations = []
+    for p in exposed_ports:
+        r = _remediate_exposed_port(p)
+        if r:
+            remediations.append(r)
+    fixed_ports = {r["port"] for r in remediations if r["ok"]}
+    still_exposed_ports = [p for p in exposed_ports if p["port"] not in fixed_ports]
+    if fixed_ports:
+        # A fix actually ran -- refresh the port snapshot so everything
+        # logged/stored below reflects reality after the fix, not the
+        # pre-fix scan from the top of this function.
+        ports = _open_listening_ports()
+        exposed_ports = [p for p in ports if p["scope"] == "exposed"]
+
+    # "Needs attention" is reserved for things that are genuinely actionable
+    # right now -- a suspicious process, a brand-new LAN device, a real
+    # dependency CVE, or a port still exposed after remediation attempts.
+    # Everything else (firmware updates available, extension status, the
+    # blocklist refresh, a clean device count) is routine and goes in the
+    # FYI section, so the loud stuff never gets lost in the routine stuff.
+    attention, fyi = [], []
+
     if suspicious:
-        summary_parts.append(
-            f"{len(suspicious)} suspicious process{'es' if len(suspicious) != 1 else ''} flagged: "
-            + "; ".join(suspicious)
-        )
-    else:
-        summary_parts.append("no suspicious processes")
+        attention.append(
+            f"{len(suspicious)} suspicious process{'es' if len(suspicious) != 1 else ''} running, matching "
+            f"known cryptominer/backdoor names or running from a temp folder: " + "; ".join(suspicious))
+
     if net_error:
-        summary_parts.append(f"network scan unavailable ({net_error})")
+        fyi.append(f"couldn't scan your LAN for new devices ({net_error})")
     elif new_count:
-        summary_parts.append(f"{new_count} new device{'s' if new_count != 1 else ''} on the LAN")
+        attention.append(f"{new_count} brand-new device{'s' if new_count != 1 else ''} just showed up on your LAN: "
+                          + ", ".join(f"{d.get('ip', '?')} ({d.get('mac', '?')})" for d in new_device_list))
     else:
-        summary_parts.append(f"{device_count} known devices on the LAN, nothing new")
-    summary_parts.append(f"firmware/drivers: {firmware_note}")
-    summary_parts.append(f"dependencies: {dependency_note}")
-    summary_parts.append(f"threat blocklist: {blocklist_note}")
-    summary_parts.append(ublock_summary)
-    summary_parts.append(ddg_summary)
-    result_text = "; ".join(summary_parts) + "."
-    if exposed_ports:
-        result_text += "\n" + _format_port_detail(exposed_ports)
+        fyi.append(f"{device_count} known device(s) on your LAN, nothing new")
+
+    if dependency_flagged:
+        attention.append(f"known security vulnerabilities in packages this project depends on: {', '.join(dependency_packages)} -- update these when you get a chance")
+
+    if secrets_flagged:
+        attention.append(f"possible secret(s) accidentally committed to this project's git history: {'; '.join(secrets_findings)} -- rotate these credentials and scrub them from history")
+
+    if pihole_flagged:
+        attention.append(f"Pi-hole ad/tracker blocking is currently OFF -- your network's DNS filtering isn't running ({pihole_note})")
+
+    for r in remediations:
+        if r["ok"]:
+            attention.append(f"found {r['label']} (port {r['port']}) exposed to your whole network because {r['risk']} -- fixed it automatically: {r['attempted']}, and confirmed it's no longer exposed")
+        else:
+            attention.append(f"found {r['label']} (port {r['port']}) exposed to your whole network because {r['risk']} -- {r['detail']}")
+
+    unknown_exposed = [p for p in still_exposed_ports if p["port"] not in _PORT_REMEDIATIONS]
+    if unknown_exposed:
+        attention.append(_format_port_detail(unknown_exposed) + " -- I don't have a known-safe fix for these, so I only report them; take a look yourself")
+
+    if firmware_flagged:
+        fyi.append(f"firmware/drivers: {firmware_note}")
+    else:
+        fyi.append("firmware/drivers up to date")
+    if not secrets_flagged:
+        fyi.append(f"secret scan: {secrets_note}")
+    if not pihole_flagged:
+        fyi.append(f"Pi-hole: {pihole_note}")
+    fyi.append(f"threat blocklist: {blocklist_note}")
+    fyi.append(ublock_summary)
+    fyi.append(ddg_summary)
+
+    critical = bool(attention)
+    if attention:
+        result_text = "NEEDS ATTENTION:\n" + "\n".join(f"- {a}" for a in attention)
+        result_text += "\n\nFYI (not urgent):\n" + "\n".join(f"- {f}" for f in fyi)
+    else:
+        result_text = "Nothing urgent sir. FYI:\n" + "\n".join(f"- {f}" for f in fyi)
 
     LAST_SECURITY_RESULT = {
         "critical": critical, "open_ports": len(ports), "ports": ports, "exposed_ports": len(exposed_ports),
         "suspicious": suspicious,
         "new_devices": new_count, "new_device_list": new_device_list,
         "firmware_flagged": firmware_flagged,
-        "dependency_flagged": dependency_flagged,
+        "dependency_flagged": dependency_flagged, "dependency_packages": dependency_packages,
+        "secrets_flagged": secrets_flagged, "secrets_findings": secrets_findings,
+        "pihole_flagged": pihole_flagged, "pihole_note": pihole_note,
         "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
+        "remediations": remediations,
     }
     _log_security_event({
         "open_ports": len(ports), "ports": ports, "exposed_ports": len(exposed_ports),
         "suspicious": suspicious, "new_devices": new_count,
         "firmware_flagged": firmware_flagged, "dependency_flagged": dependency_flagged,
+        "dependency_packages": dependency_packages,
+        "secrets_flagged": secrets_flagged, "secrets_findings": secrets_findings,
+        "pihole_flagged": pihole_flagged, "pihole_note": pihole_note,
         "ublock_ok": ublock_ok, "ddg_ok": ddg_ok,
+        "remediations": remediations,
         "critical": critical,
     })
     return result_text
