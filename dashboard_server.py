@@ -59,6 +59,7 @@ import jarvis_security
 import jarvis_mcp_server
 import tailscale_service
 import tools
+import tts_service
 import vision_service
 
 try:

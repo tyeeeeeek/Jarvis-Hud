@@ -42,11 +42,6 @@ if IS_WINDOWS:
     import win32com.client
 
 try:
-    import edge_tts; EDGE_TTS_AVAILABLE = True
-except ImportError:
-    EDGE_TTS_AVAILABLE = False
-
-try:
     import pygame; PYGAME_AVAILABLE = True
 except ImportError:
     PYGAME_AVAILABLE = False
@@ -77,6 +72,7 @@ import agent_registry
 import dashboard_server
 import telegram_common
 import email_watcher
+import tts_service
 
 try:
     import browser_control
@@ -94,8 +90,6 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 WAKE_WORD, SPEECH_RATE, WAKE_COOLDOWN = "jarvis", 2, 2.0
 SAMPLE_RATE, CHUNK_SIZE = 16000, 8000
 CTX_TIMEOUT, WS_PORT, INLINE_WAIT_SECS = 15.0, 8765, 1.5
-
-JARVIS_VOICE, JARVIS_VOICE_RATE, JARVIS_VOICE_VOL = "en-GB-RyanNeural", "+8%", "+10%"
 
 _WAKE_PHRASES = ["jarvis", "hey jarvis", "hello jarvis", "hi jarvis", "ok jarvis", "okay jarvis"]
 _WAKE_RESPONSES = ["Yes sir.", "Sir.", "Yes.", "Standing by sir.", "Of course sir."]
@@ -218,16 +212,6 @@ def _speak_local_fallback(text):
     return _speak_sapi_fallback(text) if IS_WINDOWS else _speak_linux_fallback(text)
 
 
-async def _edge_tts_save(text, path):
-    communicate = edge_tts.Communicate(text, JARVIS_VOICE, rate=JARVIS_VOICE_RATE, volume=JARVIS_VOICE_VOL)
-    await communicate.save(path)
-
-
-def _prep_tts_text(text):
-    result = text.replace(", ", " ").replace(",", " ")
-    return re.sub(r'  +', ' ', result).strip()
-
-
 def _ensure_mixer():
     """(Re)initialize the pygame mixer if it isn't currently running. Needed
     because the mixer binds to whatever the default output device was at
@@ -260,14 +244,13 @@ def speak(text):
         return True
     _ws_broadcast({"type": "speaking", "value": True, "text": text})
     completed = True
-    tts_text = _prep_tts_text(text)
+    tts_text = tts_service.prep_text(text)
 
-    if EDGE_TTS_AVAILABLE and PYGAME_AVAILABLE and _ensure_mixer():
+    if tts_service.EDGE_TTS_AVAILABLE and PYGAME_AVAILABLE and _ensure_mixer():
         tmp = os.path.join(tempfile.gettempdir(), f"jarvis_{threading.get_ident()}.mp3")
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_edge_tts_save(tts_text, tmp))
-            loop.close()
+            if not tts_service.synthesize_to_file(tts_text, tmp):
+                raise RuntimeError("edge-tts synthesis failed")
             pygame.mixer.music.load(tmp)
             pygame.mixer.music.play()
             while pygame.mixer.music.get_busy():
