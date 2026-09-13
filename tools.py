@@ -1456,6 +1456,168 @@ def restart_jarvis(reason: str = "") -> str:
     return "Restarting now, sir -- back in a few seconds."
 
 
+def trigger_lockdown(reason: str = "", target: str = "all") -> str:
+    """EMERGENCY ONLY -- call this when the user reports (or you have real
+    evidence of) an actual breach/intrusion/attack on this PC or another
+    device on the tailnet. Never call this for a routine security finding
+    that run_security_check/JarSecurity already handles on its own (a
+    single suspicious process, one new LAN device) -- those are report/
+    remediate, not this.
+
+    This deliberately does NOT delete Jarvis, your files, or any data --
+    see the project's safety-model docstring at the top of this file. A
+    mass-delete was considered and rejected: it would destroy the exact
+    evidence and backups you'd need to actually investigate, and it would
+    make the trigger itself the single highest-value target on the
+    network for an attacker to fire themselves. Instead this CONTAINS:
+      1. Snapshots ~/.jarvis (memory, conversation/security/health logs)
+         to the NAS for forensics, before touching anything else.
+      2. Revokes the Gmail/Calendar OAuth token server-side (Google's own
+         revoke endpoint), then clears it locally.
+      3. Clears the local Outlook token cache (NOT a server-side revoke --
+         see outlook_service.disconnect's docstring for exactly why not).
+      4. Reports every configured Telegram bot token as needing manual
+         regeneration via @BotFather -- Telegram has no self-revoke API,
+         so this can only ever be reported, never automated.
+      5. Takes every in-scope fleet device off the tailnet (see
+         fleet_service's "isolate" action).
+      6. Disconnects this machine's own Tailscale connection.
+      7. Stops Jarvis's own backend on this machine, LAST, since every
+         step above needs the process still running.
+
+    Requires explicit JarvisAdmin yes/no approval before ANY of the above
+    runs, and fails closed (no answer/no JarvisAdmin configured = no)
+    exactly like system_power's shutdown/restart -- this is at least as
+    consequential. `reason` is included in the approval prompt and the
+    permanent security-log entry. `target` must be "all" (this PC + every
+    fleet device), "local" (just this PC, fleet left alone), or one exact
+    fleet device name from list_fleet_devices (isolates only that device,
+    doesn't touch this PC at all) -- anything else is refused outright."""
+    target = (target or "all").strip().lower()
+    valid_targets = {"all", "local"} | set(fleet_service.FLEET_DEVICES)
+    if target not in valid_targets:
+        return (f"'{target}' isn't a valid lockdown target sir -- must be 'all', 'local', "
+                f"or one of: {', '.join(fleet_service.FLEET_DEVICES)}.")
+
+    do_local = target in ("all", "local")
+    if target == "all":
+        fleet_targets = list(fleet_service.FLEET_DEVICES)
+    elif target == "local":
+        fleet_targets = []
+    else:
+        fleet_targets = [target]
+
+    plan = []
+    if do_local:
+        plan += [
+            "snapshot ~/.jarvis to the NAS for forensics",
+            "revoke the Gmail/Calendar token",
+            "clear the local Outlook token cache",
+            "disconnect this PC's Tailscale connection",
+            "stop Jarvis's own backend on this PC",
+        ]
+    plan += [f"take {d} off the tailnet" for d in fleet_targets]
+    plan_text = "; ".join(plan)
+
+    if not jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        return ("JarvisAdmin isn't configured sir -- I won't run something this consequential "
+                "without an explicit approval gate. Set JARVIS_ADMIN_BOT_TOKEN in .env first.")
+
+    approval_desc = f"activate LOCKDOWN ({target}) -- this will: {plan_text}"
+    if reason:
+        approval_desc += f". Reason given: {reason}"
+    approved, status = jarvis_admin.request_approval(approval_desc)
+    if not approved:
+        if status == "timeout":
+            return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead with lockdown."
+        return "Denied on JarvisAdmin sir -- not going ahead with lockdown."
+
+    results = []
+
+    if do_local:
+        # 1. Forensics snapshot FIRST, while the network (Tailscale, which
+        # the NAS is reached over -- see SYNOLOGY_HOST) is still up.
+        if synology_service.SYNOLOGY_AVAILABLE:
+            try:
+                r = synology_service.upload_folder(JARVIS_DIR, f"lockdown-snapshot-{int(time.time())}")
+                results.append(f"forensics snapshot: {r['files_uploaded']} file(s) uploaded to {r['folder_path']}")
+            except Exception as e:
+                results.append(f"forensics snapshot FAILED: {e}")
+        else:
+            results.append("forensics snapshot skipped -- Synology NAS isn't configured")
+
+        # 2. Gmail: real server-side revoke.
+        if GMAIL_AVAILABLE:
+            try:
+                revoked = gmail_service.revoke_and_disconnect()
+                results.append(f"Gmail token {'revoked server-side' if revoked else 'cleared locally (server-side revoke unconfirmed)'}")
+            except Exception as e:
+                results.append(f"Gmail revoke FAILED: {e}")
+        else:
+            results.append("Gmail wasn't connected -- nothing to revoke")
+
+        # 3. Outlook: local cache clear only -- see disconnect()'s docstring.
+        if OUTLOOK_AVAILABLE:
+            try:
+                outlook_service.disconnect()
+                results.append("Outlook token cache cleared locally (NOT server-side revoked -- "
+                                "do that manually at account.microsoft.com/security if compromise is confirmed)")
+            except Exception as e:
+                results.append(f"Outlook disconnect FAILED: {e}")
+        else:
+            results.append("Outlook wasn't connected -- nothing to clear")
+
+        # 4. Telegram bots: report only -- no self-revoke API exists.
+        bot_env_names = [
+            "TELEGRAM_BOT_TOKEN", "JARVIS_CPU_ALERTS_BOT_TOKEN", "JARVIS_IMPROVEMENT_BOT_TOKEN",
+            "JARVIS_SECURITY_BOT_TOKEN", "JARVIS_ADMIN_BOT_TOKEN", "JARVIS_EMAIL_BOT_TOKEN",
+            "JARVIS_OUTLOOK_BOT_TOKEN",
+        ]
+        configured_bots = [n for n in bot_env_names if os.environ.get(n, "").strip()]
+        if configured_bots:
+            results.append(
+                f"MANUAL ACTION NEEDED: regenerate these {len(configured_bots)} Telegram bot token(s) "
+                f"via @BotFather -- Jarvis can't self-revoke them: {', '.join(configured_bots)}"
+            )
+
+    # 5. Fleet isolation.
+    for d in fleet_targets:
+        try:
+            fleet_service.run_action(d, "isolate")
+            results.append(f"{d}: taken off the tailnet")
+        except Exception as e:
+            results.append(f"{d}: isolate FAILED -- {e}")
+
+    if do_local:
+        # 6. This PC's own Tailscale -- doesn't affect Telegram delivery
+        # (that's plain internet, not the tailnet), so still safe to report
+        # on below.
+        try:
+            tailscale_service.disconnect()
+            results.append("this PC's Tailscale connection: disconnected")
+        except Exception as e:
+            results.append(f"this PC's Tailscale disconnect FAILED: {e}")
+
+    _log_security_event({"lockdown": True, "target": target, "reason": reason, "results": results})
+    summary = "LOCKDOWN executed sir:\n" + "\n".join(f"- {r}" for r in results)
+
+    if do_local:
+        # Send the full report BEFORE the actual self-stop below, since
+        # nothing can be sent once this process is gone.
+        telegram_common.send(jarvis_admin.BOT_TOKEN, jarvis_admin.CHAT_ID, summary, agent="JarvisAdmin")
+        # 7. LAST: stop Jarvis's own backend -- every step above needs this
+        # process alive to run, same ordering principle as system_power's
+        # shutdown. No systemd on Windows, so this is Linux-only for now
+        # (this project currently only runs as an always-on backend there).
+        if not IS_WINDOWS:
+            try:
+                subprocess.run(["systemctl", "--user", "stop", "jarvis-backend.service"], timeout=10)
+            except Exception:
+                pass
+
+    return summary
+
+
 def run_admin_action(description: str, command: str) -> str:
     """Run ONE real system command that needs actual shell access -- an
     install (`sudo apt install ffmpeg`, an npm/pip package), a config
@@ -4679,13 +4841,22 @@ def security_status_report() -> str:
     combined, cross-agent view; this one is specific to JarSecurity's own
     two-way channel."""
     entries = _read_jsonl_tail(SECURITY_LOG_PATH, max_lines=20)
-    sweeps = [e for e in entries if not e.get("deep_scan")]
+    lockdowns = [e for e in entries if e.get("lockdown")]
+    sweeps = [e for e in entries if not e.get("deep_scan") and not e.get("lockdown")]
     deep_scans = [e for e in entries if e.get("deep_scan")]
+    lines = []
+    if lockdowns:
+        d = lockdowns[-1]
+        lines.append(
+            f"LOCKDOWN triggered {_fmt_ago(d['ts'])} (target={d.get('target', '?')}"
+            f"{', reason: ' + d['reason'] if d.get('reason') else ''}):"
+        )
+        lines.extend(f"  - {r}" for r in d.get("results", []))
     if not sweeps:
-        lines = ["No sweeps logged yet sir -- the first one runs shortly after startup."]
+        lines.append("No sweeps logged yet sir -- the first one runs shortly after startup.")
     else:
         recent = sweeps[-5:]
-        lines = [f"Last {len(recent)} sweep{'s' if len(recent) != 1 else ''}:"]
+        lines.append(f"Last {len(recent)} sweep{'s' if len(recent) != 1 else ''}:")
         for e in reversed(recent):
             state = "CRITICAL" if e.get("critical") else "clear"
             lines.append(
