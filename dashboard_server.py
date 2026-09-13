@@ -858,26 +858,58 @@ def _stream():
     return Response(gen(), mimetype="text/event-stream")
 
 
-def start_server():
+def start_server(_retry_interval=10, _retry_deadline=300):
     """Checks Tailscale connectivity right now and binds to this device's
-    actual tailnet IP if it's up; logs and returns without starting
-    otherwise (never falls back to a looser bind). Called unconditionally
-    from jarvis.py's startup sequence, same as plaid_service.start_server --
-    the runtime check here (not a static *_AVAILABLE flag) is what decides
-    whether it actually starts, since Tailscale connectivity can change
-    between restarts in a way an import-time constant can't reflect."""
+    actual tailnet IP if it's up; otherwise retries in the background every
+    _retry_interval seconds (up to _retry_deadline seconds total) instead of
+    giving up for the rest of the process's life -- a boot race against
+    tailscaled reconnecting after reboot used to disable the dashboard
+    permanently for the day since this was a one-shot check. Called
+    unconditionally from jarvis.py's startup sequence, same as
+    plaid_service.start_server -- the runtime check here (not a static
+    *_AVAILABLE flag) is what decides whether it actually starts, since
+    Tailscale connectivity can change between restarts in a way an
+    import-time constant can't reflect."""
     if not tailscale_service.TAILSCALE_AVAILABLE:
         print("  [Dashboard] Tailscale isn't installed -- phone dashboard disabled. See README.")
         return
-    try:
-        status = tailscale_service.get_status()
-    except Exception as e:
-        print(f"  [Dashboard] Couldn't read Tailscale status -- phone dashboard disabled: {e}")
-        return
-    if status.get("backend_state") != "Running" or not status.get("self_ip"):
-        print("  [Dashboard] Tailscale isn't connected -- phone dashboard disabled. Run `tailscale up` and restart.")
+
+    def _get_ready_status():
+        try:
+            status = tailscale_service.get_status()
+        except Exception:
+            return None
+        if status.get("backend_state") != "Running" or not status.get("self_ip"):
+            return None
+        return status
+
+    status = _get_ready_status()
+    if status is None:
+        print(f"  [Dashboard] Tailscale isn't connected yet -- retrying every "
+              f"{_retry_interval}s for up to {_retry_deadline}s instead of giving up.")
+
+        def _wait_then_start():
+            waited = 0
+            while waited < _retry_deadline:
+                time.sleep(_retry_interval)
+                waited += _retry_interval
+                ready = _get_ready_status()
+                if ready is not None:
+                    print("  [Dashboard] Tailscale is up now -- starting phone dashboard.")
+                    _bind_and_serve(ready)
+                    return
+            print(f"  [Dashboard] Tailscale still isn't connected after {_retry_deadline}s -- "
+                  "giving up. Run `tailscale up` and restart Jarvis.")
+
+        threading.Thread(target=_wait_then_start, daemon=True, name="Dashboard-Retry").start()
         return
 
+    _bind_and_serve(status)
+
+
+def _bind_and_serve(status):
+    """Does the actual bind+serve once Tailscale is confirmed up, whether
+    that's on start_server's first check or after a retry."""
     host = status["self_ip"]
 
     # HTTPS is required for the /hud page's camera + speech-recognition
