@@ -6,6 +6,8 @@ __pycache__/
 vosk-model-*/
 token*.json
 credentials.json
+credentials.json.*
+*.bak
 .env
 .jarvis_key
 plaid_store.enc
