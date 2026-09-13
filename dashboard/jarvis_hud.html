@@ -279,6 +279,13 @@ function api(path, opts) {
   opts.headers = Object.assign({'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json'}, opts.headers || {});
   return fetch(path, opts).then(r => { if (r.status === 401) throw new Error('unauthorized'); return r.json(); });
 }
+// Same auth as api() above, but for binary audio -- a plain <audio src="...">
+// tag can't attach the Authorization header, so the real edge-tts clip is
+// fetched here and played from a local blob URL instead.
+function apiBlob(path) {
+  return fetch(path, { headers: { 'Authorization': 'Bearer ' + TOKEN } })
+    .then(r => { if (!r.ok) throw new Error('audio fetch failed: ' + r.status); return r.blob(); });
+}
 
 function connect() {
   const t = document.getElementById('tokenInput').value.trim();
@@ -358,9 +365,32 @@ function typewriter(text, onDone) {
 }
 
 /* ============================== speech: TTS ============================== */
+// Two paths: audioUrl (the real edge-tts clip dashboard_server.py's
+// _hud_ask synthesized -- same voice the desktop assistant speaks with) is
+// tried first and is what plays for every real brain answer; the browser's
+// own speechSynthesis is the fallback for local-only strings that never hit
+// the backend (e.g. "Camera closed, sir.") and for when edge-tts itself
+// isn't installed/failed server-side, so the HUD is never silently mute.
 let isSpeaking = false;
-function speak(text, onDone) {
+let _currentAudio = null;
+function speak(text, onDone, audioUrl) {
   typewriter(text);
+  if (audioUrl) {
+    apiBlob(audioUrl).then(blob => {
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      _currentAudio = audio;
+      isSpeaking = true;
+      const finish = (cb) => { isSpeaking = false; URL.revokeObjectURL(url); if (_currentAudio === audio) _currentAudio = null; if (cb) cb(); };
+      audio.onended = () => finish(onDone);
+      audio.onerror = () => finish(() => speakBrowserTts(text, onDone));
+      audio.play().catch(() => finish(() => speakBrowserTts(text, onDone)));
+    }).catch(() => speakBrowserTts(text, onDone));
+    return;
+  }
+  speakBrowserTts(text, onDone);
+}
+function speakBrowserTts(text, onDone) {
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
@@ -787,7 +817,7 @@ function askQuestion(question) {
       .catch(() => handleAnswer("I couldn't reach Jarvis just now, sir."));
   });
 }
-function handleAnswer(answer) {
+function handleAnswer(answer, audioUrl) {
   if (state !== STATE.THINKING) return; // already answered (e.g. the timeout already fired) -- ignore a late/duplicate arrival
   clearTimeout(askTimeoutId);
   playChirp('confirm');
@@ -801,7 +831,7 @@ function handleAnswer(answer) {
       pendingQuestion = null;
       askQuestion(q);
     }
-  });
+  }, audioUrl);
 }
 function onAskSubmit() {
   const input = document.getElementById('askInput');
@@ -847,8 +877,8 @@ function startStream() {
     try {
       const ev = JSON.parse(e.data);
       if (ev.type === 'chat_reply' && ev.payload && ev.payload.bot === 'jarvis') {
-        if (state === STATE.THINKING) handleAnswer(ev.payload.text);
-        else speak(ev.payload.text); // arrived after our own timeout already spoke a fallback -- still worth saying
+        if (state === STATE.THINKING) handleAnswer(ev.payload.text, ev.payload.audio_url);
+        else speak(ev.payload.text, null, ev.payload.audio_url); // arrived after our own timeout already spoke a fallback -- still worth saying
       }
     } catch (err) {}
   };

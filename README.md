@@ -1028,11 +1028,25 @@ box, which works regardless of the browser's speech-recognition support):
    JARVIS says "Online. Ask me anything about what I see."
 2. **Camera active** — ask anything, by voice or by typing — whatever you
    say/type that isn't a stop phrase is treated as a question. One frame
-   is captured at that moment and sent with your exact question to Gemini
-   (`vision_service.py`'s `answer_question`); the HUD shows an
-   amber "analyzing" state briefly while it thinks, plays a confirm chirp,
-   then speaks the real answer and goes back to listening for your next
-   question — a real back-and-forth, not a single scripted exchange.
+   is captured at that moment; Gemini (`vision_service.py`'s
+   `describe_scene`) turns it into a short factual description, which is
+   handed as context to the REAL Jarvis brain (the same Claude
+   tool-calling pipeline voice/Telegram/SMS/the dashboard use, via
+   `dashboard_server.py`'s `_hud_ask`) alongside your question — so "what
+   am I looking at" and "remind me about this tomorrow" both get one real,
+   capable, personality-consistent answer, not a stateless vision-only
+   reply. The HUD shows an amber "analyzing" state briefly while it
+   thinks, plays a confirm chirp, then speaks the answer with the same
+   `edge-tts` voice the desktop assistant uses (synthesized server-side by
+   `tts_service.py` and streamed to the phone as real audio, not the
+   browser's own robotic built-in voice) and goes back to listening for
+   your next question — a real back-and-forth, not a single scripted
+   exchange. For a how-to/troubleshooting question specifically, Jarvis
+   paces itself: one step (or a couple, if short) at a time, then asks
+   you to confirm before continuing, rather than reading out a whole
+   repair manual in one breath. If edge-tts is unavailable for any reason,
+   it falls back to the browser's own `speechSynthesis` automatically —
+   you'll still hear an answer, just in the lower-quality voice.
 3. Say *"close camera"* to drop back to camera-off/still-awake, or
    *"Jarvis, sleep"* to reset all the way back to idle.
 

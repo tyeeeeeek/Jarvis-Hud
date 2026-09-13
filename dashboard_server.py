@@ -148,6 +148,28 @@ _server_info = {"host": None, "port": None, "https": False, "dns_name": None}
 JARVIS_DIR = os.path.join(os.path.expanduser("~"), ".jarvis")
 TOKEN_PATH = os.path.join(JARVIS_DIR, "dashboard_token.txt")
 
+# Ephemeral edge-tts clips for the phone HUD's camera Q&A (see _hud_ask /
+# _hud_audio below) -- a fresh scratch dir per process start is fine, never
+# meant to survive a restart, same "never on a timer, never stored long-term"
+# spirit as the live camera frame relay.
+HUD_AUDIO_DIR = os.path.join(JARVIS_DIR, "hud_audio_tmp")
+os.makedirs(HUD_AUDIO_DIR, exist_ok=True)
+_HUD_AUDIO_MAX_AGE_SECONDS = 600  # sweep anything older than this on every new synth, in case a client never fetched it
+
+
+def _cleanup_stale_hud_audio():
+    try:
+        cutoff = time.time() - _HUD_AUDIO_MAX_AGE_SECONDS
+        for name in os.listdir(HUD_AUDIO_DIR):
+            path = os.path.join(HUD_AUDIO_DIR, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
 
 def _load_or_create_token():
     """DASHBOARD_TOKEN in .env wins if set. Otherwise a token is generated
@@ -326,17 +348,56 @@ def _hud_ask():
             )
 
         def _notify(reply_text):
-            bot_events.publish("chat_reply", {"bot": "jarvis", "text": reply_text})
+            # Real edge-tts audio for the phone to actually play (see
+            # _hud_audio below) -- same voice jarvis.py speaks locally on
+            # this PC through tts_service, just served as a file instead of
+            # played through this machine's own speakers. audio_url is None
+            # (never a broken link) if edge-tts isn't installed or synthesis
+            # fails for any reason -- jarvis_hud.html falls back to its own
+            # browser-native speechSynthesis in that case.
+            audio_url = None
+            try:
+                _cleanup_stale_hud_audio()
+                audio_id = uuid.uuid4().hex
+                audio_path = os.path.join(HUD_AUDIO_DIR, f"{audio_id}.mp3")
+                if tts_service.synthesize_to_file(reply_text, audio_path):
+                    audio_url = f"/api/hud/audio/{audio_id}"
+            except Exception as e:
+                print(f"  [Dashboard] HUD TTS synth failed: {e}")
+
+            bot_events.publish("chat_reply", {"bot": "jarvis", "text": reply_text, "audio_url": audio_url})
             # Shares this with the desktop HUD's Vision widget too (via
             # jarvis.py, which subscribes to this bus and forwards it over
             # its own WebSocket) -- one Jarvis, not two brains that don't
             # know what the other saw.
             bot_events.publish("vision_qa", {"question": question, "answer": reply_text})
 
-        _command_handler(vision_note + question, acked=True, notify=_notify)
+        _command_handler(vision_note + question, acked=True, notify=_notify, long_form=True)
 
     threading.Thread(target=_go, daemon=True).start()
     return jsonify({"status": "sent"})
+
+
+@app.route("/api/hud/audio/<audio_id>")
+def _hud_audio(audio_id):
+    """Serves one ephemeral edge-tts clip synthesized in _hud_ask's
+    _notify above, then deletes it -- single-use, never meant to
+    accumulate (see HUD_AUDIO_DIR / _cleanup_stale_hud_audio). Safe to
+    delete right after handing the Response to Flask on Linux: the open
+    file descriptor keeps the data readable until the response is fully
+    sent, even after its directory entry is removed. `audio_id` must be a
+    bare hex uuid -- never accepted as a path/traversal-shaped value."""
+    if not re.fullmatch(r"[0-9a-f]{32}", audio_id or ""):
+        return jsonify({"error": "bad audio id"}), 400
+    path = os.path.join(HUD_AUDIO_DIR, f"{audio_id}.mp3")
+    if not os.path.isfile(path):
+        return jsonify({"error": "not found or already served"}), 404
+    response = send_file(path, mimetype="audio/mpeg")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return response
 
 
 @app.route("/api/hud/stream", methods=["POST"])
