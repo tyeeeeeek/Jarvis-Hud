@@ -24,3 +24,4 @@ openpyxl
 pytesseract
 speedtest-cli
 pip-audit
+paramiko

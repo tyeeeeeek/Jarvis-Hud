@@ -42,13 +42,16 @@ import time
 import uuid
 from queue import Queue, Empty
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 
 import base64
+
+import requests
 
 import agent_registry
 import bot_events
 import employees
+import fleet_service
 import jarvis_admin
 import jarvis_cpu_alerts
 import jarvis_improvement
@@ -184,10 +187,11 @@ def _require_token():
     is_creation = request.path.startswith("/creations/")
     if not (request.path.startswith("/api/") or is_creation):
         return  # the page shell itself is ungated; its JS prompts for the token before calling any /api/ route
-    if request.path == "/api/stream" or is_creation:
-        # EventSource can't set custom headers, and a creation is opened by
-        # navigating straight to a URL (no chance to attach an Authorization
-        # header either) -- both pass the token in the query string instead.
+    if request.path in ("/api/stream", "/api/fleet/download") or is_creation:
+        # EventSource can't set custom headers, and a creation/download is
+        # opened by navigating straight to a URL (no chance to attach an
+        # Authorization header either) -- all three pass the token in the
+        # query string instead.
         token = request.args.get("token", "")
     else:
         auth = request.headers.get("Authorization", "")
@@ -629,6 +633,147 @@ def _finance():
         "recurring": statements_service.get_recurring_charges(),
         "anomalies": statements_service.recent_anomalies(10),
     })
+
+
+@app.route("/api/ollama-status")
+def _ollama_status():
+    """Read-only proxy to this PC's own Ollama (http://127.0.0.1:11434/api/tags,
+    same shape Ollama itself returns) -- exists because Ollama is deliberately
+    bound to loopback-only (see JarSecurity's exposed-port remediation in
+    tools.py), so nothing off this PC can reach it directly anymore, INCLUDING
+    the homelab dashboard's Docker container (it's on its own bridge network,
+    not host networking). This route is the one narrow, already-authenticated
+    (same Bearer token as every other /api/ route here) exception -- it only
+    ever forwards Ollama's own model-list response, nothing else, and only to
+    someone who already has this dashboard's token. Point a homepage/Uptime-
+    Kuma widget at this instead of Ollama's own port directly."""
+    try:
+        r = requests.get("http://127.0.0.1:11434/api/tags", timeout=5)
+        return Response(r.content, status=r.status_code, mimetype="application/json")
+    except Exception as e:
+        return jsonify({"error": f"Ollama unreachable: {e}"}), 502
+
+
+@app.route("/api/fleet/devices")
+def _fleet_devices():
+    """Every fleet device, its configured/OS/actions, merged with live
+    Tailscale info (IP, online/last-seen, direct-vs-relayed) -- same
+    shape the HUD's own Fleet tab uses (plaid_service.py's
+    /homelab/fleet), just reachable from the phone over this
+    Tailscale-gated HTTPS server instead of the HUD's local-only one."""
+    devices = fleet_service.list_devices()
+    if tailscale_service.TAILSCALE_AVAILABLE:
+        try:
+            peers_by_name = {p["name"].lower(): p for p in tailscale_service.get_status()["peers"]}
+        except Exception:
+            peers_by_name = {}
+        for d in devices:
+            d["tailscale"] = peers_by_name.get(d["name"])
+    return jsonify({"devices": devices})
+
+
+# Every fleet action reachable from the phone dashboard, by name -- always
+# goes through the matching tools.py wrapper (never fleet_service
+# directly) so restart/docker_restart get the exact same JarvisAdmin
+# approval gate here as they do from voice/Telegram. Read-only actions
+# (status/processes/docker_status) hit the same wrappers too, just with
+# nothing to approve.
+_FLEET_ACTIONS = {
+    "status": lambda device, arg: tools.fleet_status(device),
+    "processes": lambda device, arg: tools.fleet_processes(device),
+    "docker_status": lambda device, arg: tools.fleet_docker_status(device),
+    "docker_restart": lambda device, arg: tools.fleet_docker_restart(device, arg),
+    "restart": lambda device, arg: tools.fleet_restart(device),
+    "cancel_restart": lambda device, arg: tools.fleet_cancel_restart(device),
+    "apps_installed": lambda device, arg: tools.fleet_apps_installed(device),
+    "apps_search": lambda device, arg: tools.fleet_apps_search(device, arg),
+    "apps_resolve": lambda device, arg: tools.fleet_resolve_app(device, arg),
+    "app_install": lambda device, arg: tools.fleet_app_install(device, arg),
+    "app_uninstall": lambda device, arg: tools.fleet_app_uninstall(device, arg),
+    "app_upgrade": lambda device, arg: tools.fleet_app_upgrade(device, arg),
+}
+
+
+@app.route("/api/fleet/action", methods=["POST"])
+def _fleet_action():
+    """Runs one curated fleet action -- action must be a key in
+    _FLEET_ACTIONS above (never a caller-supplied command). Disruptive
+    actions (restart, docker_restart) block here until JarvisAdmin
+    approval is answered or times out, exactly like every other path to
+    them."""
+    body = request.get_json(silent=True) or {}
+    device = (body.get("device") or "").strip()
+    action = (body.get("action") or "").strip()
+    arg = body.get("arg")
+    fn = _FLEET_ACTIONS.get(action)
+    if not fn:
+        return jsonify({"error": f"unknown fleet action '{action}'"}), 400
+    return jsonify({"result": fn(device, arg)})
+
+
+@app.route("/api/fleet/browse")
+def _fleet_browse():
+    """Lists one directory on a fleet device -- read-only, no approval
+    needed. `path` blank means that device's root."""
+    device = request.args.get("device", "")
+    path = request.args.get("path", "")
+    try:
+        entries = fleet_service.list_dir(device, path)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"path": path, "entries": entries})
+
+
+@app.route("/api/fleet/download")
+def _fleet_download():
+    """Downloads one file from a fleet device -- read-only, no approval
+    needed (see the query-string-token exception for this path in
+    _require_token above; a browser navigating straight to this URL has
+    no chance to set an Authorization header)."""
+    device = request.args.get("device", "")
+    path = request.args.get("path", "")
+    try:
+        data = fleet_service.read_file(device, path)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    filename = (path or "file").replace("\\", "/").rsplit("/", 1)[-1] or "file"
+    return Response(
+        data, mimetype="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route("/api/fleet/mkdir", methods=["POST"])
+def _fleet_mkdir():
+    body = request.get_json(silent=True) or {}
+    return jsonify({"result": tools.fleet_make_dir(body.get("device", ""), body.get("path", ""))})
+
+
+@app.route("/api/fleet/delete", methods=["POST"])
+def _fleet_delete():
+    body = request.get_json(silent=True) or {}
+    return jsonify({"result": tools.fleet_delete_path(body.get("device", ""), body.get("path", ""))})
+
+
+@app.route("/api/fleet/rename", methods=["POST"])
+def _fleet_rename():
+    body = request.get_json(silent=True) or {}
+    return jsonify({"result": tools.fleet_rename_path(body.get("device", ""), body.get("src", ""), body.get("dst", ""))})
+
+
+@app.route("/api/fleet/upload", methods=["POST"])
+def _fleet_upload():
+    """Uploads one file to a fleet device -- multipart form upload
+    (`file` field) plus `device` and `path` fields for the destination.
+    Same JarvisAdmin approval gate as every other fleet write action, via
+    tools.fleet_write_file."""
+    device = request.form.get("device", "")
+    path = request.form.get("path", "")
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    data = f.read()
+    return jsonify({"result": tools.fleet_write_file(device, path, data)})
 
 
 @app.route("/api/stream")

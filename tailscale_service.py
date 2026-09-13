@@ -51,9 +51,9 @@ def _is_access_denied(result):
 def get_status():
     """Full tailnet picture: this device's own Tailscale IP/connection
     state, plus every other device on the tailnet (name, Tailscale IP, OS,
-    online/offline, whether it's usable as an exit node). Read-only, no
-    special permission needed. Raises RuntimeError with a friendly message
-    on failure."""
+    online/offline, last-seen, key expiry, direct-vs-relayed connection,
+    whether it's usable as an exit node). Read-only, no special permission
+    needed. Raises RuntimeError with a friendly message on failure."""
     if not TAILSCALE_AVAILABLE:
         raise RuntimeError("Tailscale isn't installed on this machine.")
     result = _run(["status", "--json"])
@@ -71,6 +71,15 @@ def get_status():
             "online": bool(p.get("Online")),
             "exit_node_option": bool(p.get("ExitNodeOption")),
             "is_exit_node": bool(p.get("ExitNode")),
+            # Meaningful mainly when offline (online peers are "now" by
+            # definition); a zero-value placeholder ("0001-01-01...") when
+            # Tailscale has no real last-seen data for this peer yet.
+            "last_seen": p.get("LastSeen"),
+            "key_expiry": p.get("KeyExpiry"),
+            # Empty string = direct peer-to-peer connection; a DERP region
+            # code (e.g. "nyc") means traffic is relayed through Tailscale's
+            # infrastructure instead, usually because NAT traversal failed.
+            "relay": p.get("Relay") or "",
         })
     peers.sort(key=lambda d: d["name"].lower())
 

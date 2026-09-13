@@ -185,6 +185,40 @@
   .result-box.err { background: var(--err-dim); color: #f3899a; }
   .result-box.pending { background: var(--bg-card); color: var(--text-dim); }
 
+  /* ---------- fleet ---------- */
+  .fleet-devices { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 10px; }
+  .fleet-device-chip {
+    flex-shrink: 0; background: var(--bg-panel); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 8px 14px; border-radius: 20px; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .fleet-device-chip.active { background: var(--accent); border-color: var(--accent); color: white; }
+  .fleet-device-chip .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--offline); }
+  .fleet-device-chip .dot.on { background: var(--online); }
+  .fleet-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+  .fleet-action-btn {
+    background: var(--bg-panel); border: 1px solid var(--border); color: var(--text); padding: 7px 12px;
+    border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .fleet-action-btn:disabled { opacity: 0.5; }
+  .fleet-path-bar { display: flex; align-items: center; gap: 6px; margin: 12px 0 6px; font-size: 12.5px; color: var(--text-dim); flex-wrap: wrap; }
+  .fleet-path-bar button { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 12.5px; padding: 2px 4px; }
+  .fleet-file-row {
+    display: flex; align-items: center; justify-content: space-between; padding: 9px 4px;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .fleet-file-row .name { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .fleet-file-row .name.dir::before { content: "\1F4C1  "; }
+  .fleet-file-row .name.file::before { content: "\1F4C4  "; }
+  .fleet-file-row .size { color: var(--text-faint); font-size: 11.5px; margin: 0 8px; flex-shrink: 0; }
+  .fleet-file-row .row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .fleet-file-row .row-actions button { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 13px; padding: 2px 5px; }
+  .fleet-file-row .row-actions button:hover { color: var(--text); }
+  .fleet-app-row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .fleet-app-row input {
+    flex: 1; min-width: 160px; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
+    padding: 7px 10px; border-radius: 8px; font-size: 12.5px;
+  }
+
   /* ---------- team ---------- */
   .hire-form select, .hire-form textarea {
     width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text);
@@ -456,6 +490,13 @@
       </div>
       <div id="employeeList"></div>
     </section>
+
+    <section id="tab-fleet" class="tab">
+      <h3 class="section-label">Devices</h3>
+      <div id="fleetDevices" class="fleet-devices"></div>
+
+      <div id="fleetPanel"></div>
+    </section>
   </main>
 
   <nav>
@@ -464,6 +505,7 @@
     <button data-tab="finance" onclick="showTab('finance')"><span class="icon">&#128176;</span>Finance</button>
     <button data-tab="tools" onclick="showTab('tools')"><span class="icon">&#9881;&#65039;</span>Tools</button>
     <button data-tab="org" onclick="showTab('org')"><span class="icon">&#128101;</span>Org</button>
+    <button data-tab="fleet" onclick="showTab('fleet')"><span class="icon">&#128225;</span>Fleet</button>
   </nav>
 </div>
 
@@ -645,6 +687,7 @@ function connect() {
     refreshRegistry();
     refreshStatus();
     refreshFinance();
+    refreshFleetDevices();
     startStream();
     setInterval(refreshAgents, 5000);
     setInterval(refreshRegistry, 5000);
@@ -1362,6 +1405,253 @@ function addFeedEntry(event) {
   feed.insertBefore(el, feed.firstChild);
   while (feed.children.length > 150) feed.removeChild(feed.lastChild);
   animateIn(el);
+}
+
+/* ---------------- Fleet ---------------- */
+
+let FLEET_DEVICES = [];
+let fleetActiveDevice = null;
+let fleetPath = '';
+
+const FLEET_ACTION_LABELS = { status: 'Status', processes: 'Processes', docker_status: 'Containers', restart: 'Restart', cancel_restart: 'Cancel Restart' };
+
+function refreshFleetDevices() {
+  api('/api/fleet/devices').then(d => {
+    FLEET_DEVICES = d.devices || [];
+    if (!fleetActiveDevice && FLEET_DEVICES.length) fleetActiveDevice = FLEET_DEVICES[0].name;
+    renderFleetDevices();
+    renderFleetPanel();
+  });
+}
+
+function currentFleetDevice() {
+  return FLEET_DEVICES.find(d => d.name === fleetActiveDevice);
+}
+
+function renderFleetDevices() {
+  const el = document.getElementById('fleetDevices');
+  el.innerHTML = '';
+  FLEET_DEVICES.forEach(d => {
+    const chip = document.createElement('div');
+    chip.className = 'fleet-device-chip' + (d.name === fleetActiveDevice ? ' active' : '');
+    const online = d.tailscale && d.tailscale.online;
+    chip.innerHTML = `<span class="dot ${online ? 'on' : ''}"></span>${escapeHtml(d.name)}`;
+    chip.onclick = () => { fleetActiveDevice = d.name; fleetPath = ''; renderFleetDevices(); renderFleetPanel(); };
+    el.appendChild(chip);
+  });
+}
+
+function renderFleetPanel() {
+  const panel = document.getElementById('fleetPanel');
+  const dev = currentFleetDevice();
+  if (!dev) { panel.innerHTML = '<span class="w-idle">No devices yet.</span>'; return; }
+
+  let html = `<div class="card">
+    <div class="name">${escapeHtml(dev.name)} <span class="status-pill ${dev.configured ? 'done' : 'failed'}">${dev.configured ? 'ready' : 'not configured'}</span></div>
+    <div class="desc">${dev.os.toUpperCase()}${dev.tailscale ? ' · ' + escapeHtml(dev.tailscale.ip || '') + (dev.tailscale.online ? ' · online' : ' · offline') : ''}</div>
+    <div class="fleet-actions">`;
+  dev.actions.forEach(a => {
+    if (a === 'docker_restart' || !FLEET_ACTION_LABELS[a]) return;
+    html += `<button class="fleet-action-btn" ${dev.configured ? '' : 'disabled'} onclick="runFleetAction('${dev.name}','${a}')">${FLEET_ACTION_LABELS[a]}</button>`;
+  });
+  html += `</div>`;
+  if (dev.actions.includes('docker_restart')) {
+    html += `<div class="fleet-actions">`;
+    ['radarr', 'sonarr', 'prowlarr', 'jellyfin'].forEach(c => {
+      html += `<button class="fleet-action-btn" ${dev.configured ? '' : 'disabled'} onclick="runFleetAction('${dev.name}','docker_restart','${c}')">Restart ${c}</button>`;
+    });
+    html += `</div>`;
+  }
+  html += `<div id="fleetResult"></div></div>`;
+  if (dev.actions.includes('apps_installed')) {
+    html += `<h3 class="section-label">Apps (winget)</h3>
+    <div class="fleet-actions">
+      <button class="fleet-action-btn" ${dev.configured ? '' : 'disabled'} onclick="runFleetAction('${dev.name}','apps_installed')">Installed Apps</button>
+    </div>
+    <div class="fleet-app-row">
+      <input type="text" id="fleetAppSearchInput" placeholder="Search for an app...">
+      <button class="fleet-action-btn" id="fleetAppSearchBtn">Search</button>
+    </div>
+    <div class="fleet-app-row">
+      <input type="text" id="fleetAppIdInput" placeholder="App name (e.g. 7zip) or exact id">
+      <button class="fleet-action-btn" id="fleetAppFindBtn">Find</button>
+      <button class="fleet-action-btn" id="fleetAppInstallBtn">Install</button>
+      <button class="fleet-action-btn" id="fleetAppUpgradeBtn">Upgrade</button>
+      <button class="fleet-action-btn" id="fleetAppUninstallBtn">Uninstall</button>
+    </div>
+    <span class="w-idle">Type a loose name and hit Find to see the exact match/id first, or just hit Install/Upgrade/Uninstall directly -- they resolve the name themselves too.</span>`;
+  }
+  html += `
+    <h3 class="section-label">Files</h3>
+    <div class="fleet-path-bar" id="fleetPathBar"></div>
+    <div class="fleet-actions">
+      <button class="fleet-action-btn" id="fleetNewFolderBtn">+ New Folder</button>
+      <button class="fleet-action-btn" id="fleetUploadBtn">Upload</button>
+    </div>
+    <input type="file" id="fleetUploadInput" style="display:none">
+    <div id="fleetFiles"></div>`;
+
+  panel.innerHTML = html;
+  document.getElementById('fleetNewFolderBtn').onclick = fleetNewFolder;
+  document.getElementById('fleetUploadBtn').onclick = () => document.getElementById('fleetUploadInput').click();
+  document.getElementById('fleetUploadInput').onchange = (e) => fleetUpload(e.target);
+  const searchBtn = document.getElementById('fleetAppSearchBtn');
+  if (searchBtn) searchBtn.onclick = () => {
+    const q = document.getElementById('fleetAppSearchInput').value.trim();
+    if (q) runFleetAction(dev.name, 'apps_search', q);
+  };
+  const findBtn = document.getElementById('fleetAppFindBtn');
+  if (findBtn) findBtn.onclick = () => {
+    const id = document.getElementById('fleetAppIdInput').value.trim();
+    if (id) runFleetAction(dev.name, 'apps_resolve', id);
+  };
+  const installBtn = document.getElementById('fleetAppInstallBtn');
+  if (installBtn) installBtn.onclick = () => {
+    const id = document.getElementById('fleetAppIdInput').value.trim();
+    if (id) runFleetAction(dev.name, 'app_install', id);
+  };
+  const upgradeBtn = document.getElementById('fleetAppUpgradeBtn');
+  if (upgradeBtn) upgradeBtn.onclick = () => {
+    const id = document.getElementById('fleetAppIdInput').value.trim();
+    if (id) runFleetAction(dev.name, 'app_upgrade', id);
+  };
+  const uninstallBtn = document.getElementById('fleetAppUninstallBtn');
+  if (uninstallBtn) uninstallBtn.onclick = () => {
+    const id = document.getElementById('fleetAppIdInput').value.trim();
+    if (id && confirm(`Uninstall '${id}' from ${dev.name}? This still needs your JarvisAdmin approval too.`)) {
+      runFleetAction(dev.name, 'app_uninstall', id);
+    }
+  };
+  renderFleetPathBar();
+  fleetBrowse();
+}
+
+const FLEET_APPROVAL_ACTIONS = ['docker_restart', 'restart', 'app_install', 'app_uninstall', 'app_upgrade'];
+function runFleetAction(device, action, arg) {
+  const resultEl = document.getElementById('fleetResult');
+  const needsApproval = FLEET_APPROVAL_ACTIONS.includes(action);
+  resultEl.innerHTML = `<div class="result-box pending">Running${needsApproval ? ' (needs Telegram approval)' : ''}...</div>`;
+  api('/api/fleet/action', { method: 'POST', body: JSON.stringify({ device, action, arg }) })
+    .then(d => { resultEl.innerHTML = `<div class="result-box ok">${escapeHtml(d.result || '')}</div>`; })
+    .catch(() => { resultEl.innerHTML = `<div class="result-box err">Request failed.</div>`; });
+}
+
+// A single trailing-slash-normalized path is the one source of truth
+// (fleetPath) -- everything else (breadcrumbs, the file list, new
+// folder/rename targets) derives from it via fleetFullPath, so there's
+// never a second place path-joining logic can drift out of sync.
+function fleetSep() {
+  const dev = currentFleetDevice();
+  return dev && dev.os === 'windows' ? '\\' : '/';
+}
+function fleetRoot() {
+  const dev = currentFleetDevice();
+  return dev && dev.os === 'windows' ? 'C:\\' : '/';
+}
+function fleetFullPath(name) {
+  return (fleetPath || fleetRoot()) + (fleetPath && !fleetPath.endsWith(fleetSep()) ? fleetSep() : '') + name;
+}
+
+function renderFleetPathBar() {
+  const bar = document.getElementById('fleetPathBar');
+  if (!bar) return;
+  const isWin = currentFleetDevice() && currentFleetDevice().os === 'windows';
+  const sep = fleetSep();
+  let parts = fleetPath.split(/[\\/]/).filter(Boolean);
+  if (isWin && parts[0] && /^[A-Za-z]:$/.test(parts[0])) parts = parts.slice(1);
+  bar.innerHTML = '';
+  const rootBtn = document.createElement('button');
+  rootBtn.textContent = fleetRoot();
+  rootBtn.onclick = () => fleetGoto('');
+  bar.appendChild(rootBtn);
+  let acc = fleetRoot();
+  parts.forEach(p => {
+    bar.appendChild(document.createTextNode(` ${sep} `));
+    acc = acc.endsWith(sep) ? acc + p : acc + sep + p;
+    const target = acc;
+    const btn = document.createElement('button');
+    btn.textContent = p;
+    btn.onclick = () => fleetGoto(target);
+    bar.appendChild(btn);
+  });
+}
+
+function fleetGoto(path) {
+  fleetPath = path;
+  renderFleetPathBar();
+  fleetBrowse();
+}
+
+function fleetBrowse() {
+  const list = document.getElementById('fleetFiles');
+  if (!list) return;
+  const device = fleetActiveDevice;
+  list.innerHTML = '<span class="w-idle">Loading...</span>';
+  api(`/api/fleet/browse?device=${encodeURIComponent(device)}&path=${encodeURIComponent(fleetPath)}`)
+    .then(d => {
+      if (d.error) { list.innerHTML = `<div class="result-box err">${escapeHtml(d.error)}</div>`; return; }
+      list.innerHTML = '';
+      (d.entries || []).forEach(e => {
+        const row = document.createElement('div');
+        row.className = 'fleet-file-row';
+        const sizeLabel = e.is_dir ? '' : `${Math.max(1, Math.round(e.size / 1024))} KB`;
+        row.innerHTML = `
+          <span class="name ${e.is_dir ? 'dir' : 'file'}">${escapeHtml(e.name)}</span>
+          <span class="size">${sizeLabel}</span>
+          <span class="row-actions">
+            <button title="Rename">&#9998;</button>
+            <button title="Delete">&#128465;</button>
+          </span>`;
+        row.querySelector('.name').onclick = () => {
+          if (e.is_dir) fleetGoto(fleetFullPath(e.name));
+          else fleetDownload(device, fleetFullPath(e.name));
+        };
+        const btns = row.querySelectorAll('.row-actions button');
+        btns[0].onclick = (ev) => { ev.stopPropagation(); fleetRename(device, e); };
+        btns[1].onclick = (ev) => { ev.stopPropagation(); fleetDelete(device, e); };
+        list.appendChild(row);
+      });
+      if (!(d.entries || []).length) list.innerHTML = '<span class="w-idle">Empty folder.</span>';
+    })
+    .catch(() => { list.innerHTML = '<div class="result-box err">Request failed.</div>'; });
+}
+
+function fleetDownload(device, path) {
+  const url = `/api/fleet/download?device=${encodeURIComponent(device)}&path=${encodeURIComponent(path)}&token=${encodeURIComponent(TOKEN)}`;
+  window.open(url, '_blank');
+}
+
+function fleetNewFolder() {
+  const name = window.prompt('New folder name:');
+  if (!name) return;
+  api('/api/fleet/mkdir', { method: 'POST', body: JSON.stringify({ device: fleetActiveDevice, path: fleetFullPath(name) }) })
+    .then(d => { if (d.result) window.alert(d.result); fleetBrowse(); });
+}
+
+function fleetDelete(device, entry) {
+  if (!window.confirm(`Delete "${entry.name}"?${entry.is_dir ? ' (must be empty)' : ''}`)) return;
+  api('/api/fleet/delete', { method: 'POST', body: JSON.stringify({ device, path: fleetFullPath(entry.name) }) })
+    .then(d => { if (d.result) window.alert(d.result); fleetBrowse(); });
+}
+
+function fleetRename(device, entry) {
+  const newName = window.prompt(`Rename "${entry.name}" to:`, entry.name);
+  if (!newName || newName === entry.name) return;
+  api('/api/fleet/rename', { method: 'POST', body: JSON.stringify({ device, src: fleetFullPath(entry.name), dst: fleetFullPath(newName) }) })
+    .then(d => { if (d.result) window.alert(d.result); fleetBrowse(); });
+}
+
+function fleetUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append('device', fleetActiveDevice);
+  formData.append('path', fleetFullPath(file.name));
+  formData.append('file', file);
+  fetch('/api/fleet/upload', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: formData })
+    .then(r => r.json())
+    .then(d => { if (d.result) window.alert(d.result); fleetBrowse(); });
+  input.value = '';
 }
 
 if (TOKEN) {

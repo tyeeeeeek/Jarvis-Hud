@@ -2,12 +2,24 @@ import { useEffect, useState, useCallback } from "react";
 
 const API = "http://localhost:8766";
 
+interface TailscalePeer {
+  name: string;
+  ip: string | null;
+  os: string;
+  online: boolean;
+  exit_node_option: boolean;
+  is_exit_node: boolean;
+  last_seen: string | null;
+  key_expiry: string | null;
+  relay: string;
+}
+
 interface FleetDevice {
   name: string;
   os: string;
-  transport: string;
   configured: boolean;
   actions: string[];
+  tailscale?: TailscalePeer | null;
 }
 
 type StatusResult = { ok: true; output: string } | { ok: false; error: string };
@@ -28,10 +40,36 @@ function DetailRow({ label, value, bad }: { label: string; value: string; bad?: 
   );
 }
 
+// Tailscale reports a zero-value placeholder ("0001-01-01T...") rather
+// than omitting the field when it has no real last-seen/expiry data for a
+// peer yet -- treat that the same as null instead of printing "56000
+// years ago".
+function agoLabel(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t) || t < 0) return null;
+  const mins = (Date.now() - t) / 60000;
+  if (mins < 0) return null;
+  if (mins < 1) return "JUST NOW";
+  if (mins < 60) return `${Math.round(mins)}M AGO`;
+  const hours = mins / 60;
+  if (hours < 48) return `${hours.toFixed(1)}H AGO`;
+  return `${Math.round(hours / 24)}D AGO`;
+}
+
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  const days = (t - Date.now()) / 86400000;
+  return Number.isFinite(days) ? Math.round(days) : null;
+}
+
 // Fleet devices reachable over the tailnet -- not just the online/offline
 // dot HomelabWidget/homepage already show (that's tailscale_service, pure
-// status), but actual curated remote actions via fleet_service's SSH
-// bridge (tailscale-ssh for TyeStore, OpenSSH-over-Tailscale for the
+// status), but actual curated remote actions via fleet_service's OpenSSH
+// bridge (Tailscale's own SSH server doesn't run under Synology's
+// packaging, so even TyeStore uses OpenSSH-over-Tailscale like the
 // Windows boxes). See fleet_service.py's module docstring for what "not
 // configured yet" means per device and how to fix it.
 export function FleetWidget() {
@@ -102,10 +140,31 @@ export function FleetWidget() {
             <div className="w-rack-detail__title">{DEVICE_LABELS[d.name] ?? d.name.toUpperCase()}</div>
 
             <DetailRow
-              label={`${d.os.toUpperCase()} · ${d.transport === "tailscale-ssh" ? "TAILSCALE SSH" : "OPENSSH"}`}
+              label={`${d.os.toUpperCase()} · OPENSSH`}
               value={d.configured ? "READY" : "NOT CONFIGURED"}
               bad={!d.configured}
             />
+
+            {d.tailscale && (
+              <>
+                <DetailRow
+                  label="TAILSCALE"
+                  value={d.tailscale.online ? "ONLINE" : `OFFLINE${agoLabel(d.tailscale.last_seen) ? " · LAST SEEN " + agoLabel(d.tailscale.last_seen) : ""}`}
+                  bad={!d.tailscale.online}
+                />
+                <DetailRow label="TAILSCALE IP" value={d.tailscale.ip ?? "–"} />
+                <DetailRow
+                  label="CONNECTION"
+                  value={d.tailscale.online ? (d.tailscale.relay ? `RELAYED (${d.tailscale.relay.toUpperCase()})` : "DIRECT") : "–"}
+                />
+                {(() => {
+                  const days = daysUntil(d.tailscale.key_expiry);
+                  return days !== null ? (
+                    <DetailRow label="KEY EXPIRES" value={days <= 0 ? "EXPIRED" : `IN ${days}D`} bad={days <= 14} />
+                  ) : null;
+                })()}
+              </>
+            )}
 
             <div className="w-row">
               <button

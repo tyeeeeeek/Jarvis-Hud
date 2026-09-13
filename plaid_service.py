@@ -354,10 +354,22 @@ def _homelab_ai_services_restart():
 @app.route("/homelab/fleet")
 def _homelab_fleet():
     """Every fleet device Jarvis can reach into, what it can run there,
-    and whether it's actually configured yet -- read-only, no SSH call
-    made here (see fleet_service.list_devices's docstring)."""
+    whether it's actually configured yet (see fleet_service.list_devices's
+    docstring), merged with that device's live Tailscale info (IP, online/
+    last-seen, direct-vs-relayed) -- read-only, no SSH call made here, just
+    one already-cheap `tailscale status` lookup."""
     import fleet_service
-    return jsonify({"devices": fleet_service.list_devices()})
+    import tailscale_service
+    devices = fleet_service.list_devices()
+    if tailscale_service.TAILSCALE_AVAILABLE:
+        try:
+            peers_by_name = {p["name"].lower(): p for p in tailscale_service.get_status()["peers"]}
+        except Exception:
+            peers_by_name = {}
+        for d in devices:
+            peer = peers_by_name.get(d["name"])
+            d["tailscale"] = peer if peer else None
+    return jsonify({"devices": devices})
 
 
 @app.route("/homelab/fleet/status", methods=["POST"])

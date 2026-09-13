@@ -2970,6 +2970,327 @@ def fleet_cancel_restart(device: str) -> str:
     return f"Cancelled the pending restart on {device}, sir."
 
 
+def fleet_processes(device: str) -> str:
+    """Top 10 processes by CPU usage on a named fleet device. Read-only.
+    Use for "what's running on [device]"/"what's using CPU on [device]"
+    requests."""
+    try:
+        result = fleet_service.run_action(device, "processes")
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't reach {device} sir: {e}"
+    return f"Top processes on {device} sir:\n{result['output']}"
+
+
+def fleet_docker_status(device: str) -> str:
+    """List Docker containers and their status on a named fleet device --
+    currently only tyestore actually runs Docker. Read-only. Use for
+    "what containers are running on [device]"/"is [container] up on
+    [device]" requests."""
+    try:
+        result = fleet_service.run_action(device, "docker_status")
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't reach {device} sir: {e}"
+    return f"Containers on {device} sir:\n{result['output']}"
+
+
+def fleet_docker_restart(device: str, container: str) -> str:
+    """Restart one Docker container on a named fleet device. `container`
+    must be one of: radarr, sonarr, prowlarr, jellyfin (the media stack
+    on tyestore -- fleet_service.DOCKER_CONTAINERS is the source of
+    truth). If JARVIS_ADMIN_BOT_TOKEN is configured, first waits for
+    explicit yes/no approval over the dedicated JarvisAdmin Telegram bot,
+    same as fleet_restart -- this call blocks until answered or times
+    out."""
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"restart the {container} container on {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't restart that."
+    try:
+        fleet_service.run_action(device, "docker_restart", arg=container)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't restart that on {device} sir: {e}"
+    return f"Restarted {container} on {device}, sir."
+
+
+def fleet_apps_installed(device: str) -> str:
+    """Lists installed applications on a Windows fleet device (via winget).
+    Read-only. Use for "what's installed on [device]"/"do I have [app] on
+    [device]" requests."""
+    try:
+        result = fleet_service.run_action(device, "apps_installed", timeout=30)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't reach {device} sir: {e}"
+    return f"Installed apps on {device} sir:\n{result['output']}"
+
+
+def fleet_apps_search(device: str, query: str) -> str:
+    """Searches winget's package repository on a Windows fleet device for
+    an app by name/keyword -- read-only, doesn't install anything. Use this
+    to find the exact package id (e.g. "Mozilla.Firefox") before calling
+    fleet_app_install."""
+    try:
+        result = fleet_service.run_action(device, "apps_search", arg=query, timeout=30)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't reach {device} sir: {e}"
+    return f"Search results on {device} sir:\n{result['output']}"
+
+
+def fleet_resolve_app(device: str, name: str) -> str:
+    """Read-only: finds the single closest-matching real app for a loose
+    name (e.g. "7zip") on a Windows fleet device and reports its exact
+    winget package id -- doesn't install/change anything. Use this whenever
+    the user wants to double-check what a name resolves to before
+    installing/uninstalling/upgrading it (fleet_app_install and friends
+    also auto-resolve a loose name themselves, but this is the "just tell
+    me" version with nothing else happening)."""
+    try:
+        match = fleet_service.resolve_app(device, name)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't reach {device} sir: {e}"
+    return f"Closest match on {device} sir: {match['name']} -- id: {match['id']}"
+
+
+def _fleet_resolve_or_none(device: str, name_or_id: str):
+    """Shared helper for fleet_app_install/uninstall/upgrade: if `name_or_id`
+    is already an exact winget id (has a Publisher.App-style dot in it,
+    matching a real package), use it as-is; otherwise treat it as a loose
+    name and resolve it via fleet_service.resolve_app first. Returns
+    (resolved_id, display_name) or (None, error_message)."""
+    candidate = (name_or_id or "").strip()
+    try:
+        match = fleet_service.resolve_app(device, candidate)
+    except RuntimeError as e:
+        return None, f"{e} sir."
+    except Exception as e:
+        return None, f"I couldn't reach {device} sir: {e}"
+    return match["id"], match["name"]
+
+
+def fleet_app_install(device: str, name_or_id: str) -> str:
+    """Installs one application via winget on a Windows fleet device --
+    `name_or_id` can be a loose name (e.g. "7zip") or an exact winget
+    package id; either way it's resolved to the real closest-matching app
+    and exact id first (read-only lookup, see fleet_resolve_app), and THAT
+    resolved app is what gets named in the approval request and installed
+    -- never a raw, unverified guess. If JARVIS_ADMIN_BOT_TOKEN is
+    configured, waits for explicit yes/no approval over the dedicated
+    JarvisAdmin Telegram bot, same as fleet_docker_restart -- this call
+    blocks until answered or times out. Downloads can take a while, so this
+    allows more time than a normal fleet action."""
+    pkg_id, display = _fleet_resolve_or_none(device, name_or_id)
+    if pkg_id is None:
+        return display
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"install '{display}' ({pkg_id}) on {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't install that."
+    try:
+        result = fleet_service.run_action(device, "app_install", arg=pkg_id, timeout=300)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't install that on {device} sir: {e}"
+    return f"Install result on {device} sir ({display} -- {pkg_id}):\n{result['output']}"
+
+
+def fleet_app_uninstall(device: str, name_or_id: str) -> str:
+    """Uninstalls one application via winget on a Windows fleet device --
+    `name_or_id` can be a loose name or an exact winget package id, resolved
+    to the real closest-matching app first, same as fleet_app_install.
+    Approval-gated the same way."""
+    pkg_id, display = _fleet_resolve_or_none(device, name_or_id)
+    if pkg_id is None:
+        return display
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"uninstall '{display}' ({pkg_id}) from {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't uninstall that."
+    try:
+        result = fleet_service.run_action(device, "app_uninstall", arg=pkg_id, timeout=180)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't uninstall that on {device} sir: {e}"
+    return f"Uninstall result on {device} sir ({display} -- {pkg_id}):\n{result['output']}"
+
+
+def fleet_app_upgrade(device: str, name_or_id: str) -> str:
+    """Upgrades one application to its latest version via winget on a
+    Windows fleet device -- `name_or_id` can be a loose name or an exact
+    winget package id, resolved to the real closest-matching app first,
+    same as fleet_app_install. Approval-gated the same way."""
+    pkg_id, display = _fleet_resolve_or_none(device, name_or_id)
+    if pkg_id is None:
+        return display
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"upgrade '{display}' ({pkg_id}) on {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't upgrade that."
+    try:
+        result = fleet_service.run_action(device, "app_upgrade", arg=pkg_id, timeout=300)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't upgrade that on {device} sir: {e}"
+    return f"Upgrade result on {device} sir ({display} -- {pkg_id}):\n{result['output']}"
+
+
+def fleet_wake(device: str) -> str:
+    """Wake a named fleet device from sleep or a full shutdown --
+    tyestore, tyewinpc1, tyepc, or tyewintablet. Use for "wake up
+    [device]"/"turn on [device]" requests. Needs FLEET_<DEVICE>_MAC set
+    in .env and Wake-on-LAN enabled on that device's BIOS/NIC (see
+    fleet_service.py's module docstring) -- returns a clear "not
+    configured" message otherwise rather than failing oddly. Not gated by
+    JarvisAdmin approval, unlike fleet_restart -- turning a device ON
+    isn't disruptive. Sending the packet doesn't confirm the device
+    actually woke up; only that Jarvis is reachable on the same local
+    network can matter here (Tailscale alone can't deliver it to a
+    powered-off machine, and Wi-Fi-only Wake-on-LAN rarely works)."""
+    try:
+        result = fleet_service.wake(device)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't send that sir: {e}"
+    return (f"Sent a wake-up signal to {device} sir ({result['mac']}) -- give it a minute or two "
+            f"to boot. I've no way to confirm it actually powered on until it reconnects.")
+
+
+def fleet_list_dir(device: str, path: str = "") -> str:
+    """Lists one directory's contents on a named fleet device -- files
+    and folders, with sizes. Read-only. `path` is a real filesystem path
+    on that device (e.g. "C:\\Users\\tyeke\\Desktop" on a Windows box,
+    "/volume1/JarvisSync" on tyestore) -- leave blank for that device's
+    root (C:\\ on Windows, / on Linux). Use for "what's in [folder] on
+    [device]"/"show me the files on [device]" requests."""
+    try:
+        entries = fleet_service.list_dir(device, path)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't list that sir: {e}"
+    if not entries:
+        return f"That folder's empty on {device}, sir."
+    lines = []
+    for e in entries[:40]:
+        if e["is_dir"]:
+            lines.append(f"[DIR]  {e['name']}")
+        else:
+            kb = max(1, e["size"] // 1024)
+            lines.append(f"       {e['name']} ({kb} KB)")
+    more = f"\n...and {len(entries) - 40} more" if len(entries) > 40 else ""
+    return f"{path or '(root)'} on {device} sir:\n" + "\n".join(lines) + more
+
+
+def fleet_make_dir(device: str, path: str) -> str:
+    """Creates one new, empty folder on a named fleet device at an exact
+    path. Doesn't create missing parent folders -- the parent must
+    already exist. If JARVIS_ADMIN_BOT_TOKEN is configured, first waits
+    for explicit yes/no approval over JarvisAdmin, same as every other
+    fleet write action."""
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"create folder '{path}' on {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't create that."
+    try:
+        fleet_service.make_dir(device, path)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't create that sir: {e}"
+    return f"Created '{path}' on {device}, sir."
+
+
+def fleet_delete_path(device: str, path: str) -> str:
+    """Deletes ONE file, or ONE already-empty folder, on a named fleet
+    device. Not recursive -- a non-empty folder refuses to delete rather
+    than this wiping out a whole tree. If JARVIS_ADMIN_BOT_TOKEN is
+    configured, first waits for explicit yes/no approval over
+    JarvisAdmin, showing the exact path about to be deleted -- this call
+    blocks until answered or times out."""
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"delete '{path}' on {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not deleting that."
+            return "Denied on JarvisAdmin sir -- I won't delete that."
+    try:
+        fleet_service.delete_path(device, path)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't delete that sir: {e}"
+    return f"Deleted '{path}' on {device}, sir."
+
+
+def fleet_write_file(device: str, path: str, data: bytes) -> str:
+    """Uploads/overwrites one file on a named fleet device with raw
+    bytes. Not registered as a voice/chat tool (binary data doesn't fit
+    that interface) -- called directly by the phone dashboard's upload
+    route, which is why it lives here rather than only in fleet_service:
+    same JarvisAdmin approval gate as every other fleet write action.
+    Refuses anything over 50MB. If JARVIS_ADMIN_BOT_TOKEN is configured,
+    first waits for explicit yes/no approval, showing the exact
+    destination path -- this call blocks until answered or times out."""
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"upload a file to '{path}' on {device} ({len(data)} bytes)")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not uploading that."
+            return "Denied on JarvisAdmin sir -- I won't upload that."
+    try:
+        fleet_service.write_file(device, path, data)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't upload that sir: {e}"
+    return f"Uploaded '{path}' to {device}, sir."
+
+
+def fleet_rename_path(device: str, src: str, dst: str) -> str:
+    """Renames or moves one file or folder on a named fleet device
+    (same-device only). If JARVIS_ADMIN_BOT_TOKEN is configured, first
+    waits for explicit yes/no approval over JarvisAdmin, showing both the
+    source and destination paths -- this call blocks until answered or
+    times out."""
+    if jarvis_admin.JARVIS_ADMIN_AVAILABLE:
+        approved, status = jarvis_admin.request_approval(f"rename/move '{src}' to '{dst}' on {device}")
+        if not approved:
+            if status == "timeout":
+                return "No response on JarvisAdmin in time sir -- treating that as a no, for safety. Not going ahead."
+            return "Denied on JarvisAdmin sir -- I won't do that."
+    try:
+        fleet_service.rename_path(device, src, dst)
+    except RuntimeError as e:
+        return f"{e} sir."
+    except Exception as e:
+        return f"I couldn't do that sir: {e}"
+    return f"Moved '{src}' to '{dst}' on {device}, sir."
+
+
 # ================================================================ FINANCE (unchanged services, thin wrappers)
 def sync_bank_data() -> str:
     """Sync the latest bank transactions into Jarvis's records. Call this on

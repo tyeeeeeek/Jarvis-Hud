@@ -712,6 +712,36 @@ sudo visudo -c   # confirm it says "parsed OK"
 Without this, a down system-level service gets a clear "passwordless sudo isn't
 set up yet" message instead of restarting — never a hang, never a silent no-op.
 
+### Wake-on-LAN (turn a fleet device back on remotely)
+
+Jarvis can wake a sleeping or fully shut-down fleet device (`tyestore`,
+`tyewinpc1`, `tyepc`, `tyewintablet`) by broadcasting a Wake-on-LAN magic packet
+on its own local network — ask "wake up tyewinpc1"/"turn on [device]"
+(`fleet_wake`). Unlike every other Fleet action, this doesn't use SSH at all —
+the whole point is reaching a device that has no SSH server running because
+it's off.
+
+Setup, per device:
+1. **BIOS/UEFI** — enable "Wake on LAN" (sometimes named "Power On By PCI-E";
+   disable "Deep Sleep Control" if present). Only doable locally, in the BIOS
+   setup screen.
+2. **Windows** — Device Manager > the wired Ethernet adapter > Power
+   Management tab > check "Allow this device to wake the computer"; Advanced
+   tab > "Wake on Magic Packet" = Enabled. Also turn off Fast Startup (Power
+   Options > Choose what the power buttons do > uncheck "Turn on fast
+   startup") — it can block the NIC from listening for a magic packet after a
+   full shutdown on some systems. **Linux** — `sudo ethtool -s <iface> wol g`
+   (persist across reboots with a NetworkManager/udev rule).
+3. In `.env`, set `FLEET_<DEVICE>_MAC` to that device's **wired Ethernet**
+   MAC address (Windows: `Get-NetAdapter`; Linux: `ip link`) — not Wi-Fi;
+   Wi-Fi Wake-on-LAN is unreliable and often unsupported entirely.
+
+This only works if Jarvis's host and the target are on the same local network
+— Tailscale can't deliver a broadcast packet to a machine that's powered off,
+so waking a device from outside your home network isn't possible this way.
+Sending the packet is fire-and-forget: Jarvis has no way to confirm the device
+actually powered on, only that the packet went out.
+
 ---
 
 ## Connect email + calendar (Gmail & Outlook)
