@@ -72,6 +72,7 @@ import agent_registry
 import dashboard_server
 import telegram_common
 import email_watcher
+import gmail_service
 import tts_service
 
 try:
@@ -882,7 +883,11 @@ def _health_watcher_thread():
     The JarvisCPU_Alerts sub-agent (jarvis_cpu_alerts.py) rides along on the
     same cycle: it gets a summary after every check, and a critical issue
     (overheating risk or critically low disk space) triggers an immediate
-    Telegram alert from it, same as the voice/SMS/main-Telegram alert below."""
+    Telegram alert from it -- that dedicated bot owns Telegram delivery for
+    this, not the main Jarvis bot (a proactive watcher alert duplicated onto
+    both is exactly the noise the multiple-dedicated-bots setup exists to
+    avoid); voice and SMS still fire below as the immediate/away-from-
+    Telegram channels."""
     while not pipeline_stop.is_set():
         try:
             result = tools.check_system_health()
@@ -895,7 +900,7 @@ def _health_watcher_thread():
             text = f"Health check sir: {result}"
             with _command_lock:
                 speak(text)
-            _notify_all(text)
+            sms.send_sms(text)
             jarvis_cpu_alerts.send_critical_alert(result)
             bot_events.publish("health_critical", {"result": result})
         if result:
@@ -914,9 +919,9 @@ def _finance_watcher_thread():
     speaks up for anomalies that haven't already been flagged (see
     statements_service.check_spending_anomalies's dedup), so this stays
     quiet on every day nothing's actually notable. No dedicated Telegram
-    bot for this -- reuses _notify_all like _reminder_watcher_thread and
-    _on_important_email already do, since a proactive finance channel
-    doesn't need its own isolated bot the way PC-health/security do."""
+    bot for this -- reuses _notify_all like _reminder_watcher_thread does,
+    since a proactive finance channel doesn't need its own isolated bot the
+    way PC-health/security/email do."""
     while not pipeline_stop.is_set():
         try:
             anomalies = tools._finance_watcher_check()
@@ -942,12 +947,14 @@ def _ai_services_watcher_thread():
     services this project's own AI/monitoring stack depends on (see
     tools._AI_SERVICES). Any service found down gets one automatic
     tools.restart_ai_service() attempt, and the outcome (restarted, or
-    restart failed and why) is announced once via _notify_all + bot_events.
-    _alerted tracks which services already got an alert this outage so a
-    restart that fails doesn't spam the same alert every 10 minutes; it's
-    cleared the moment a service is confirmed back up, so a future outage
-    still alerts fresh. No dedicated Telegram bot for this, same reasoning
-    as _finance_watcher_thread above."""
+    restart failed and why) is announced once via JarSecurity (its "found
+    something wrong, tried a fix, here's the outcome" job -- same shape as
+    its exposed-port remediation) plus SMS, and bot_events. _alerted tracks
+    which services already got an alert this outage so a restart that fails
+    doesn't spam the same alert every 10 minutes; it's cleared the moment a
+    service is confirmed back up, so a future outage still alerts fresh.
+    Deliberately not sent through the main Jarvis Telegram bot -- "is
+    anything down" is JarSecurity's job, not the main bot's."""
     _alerted = set()
     while not pipeline_stop.is_set():
         try:
@@ -966,7 +973,8 @@ def _ai_services_watcher_thread():
                 result = f"restart attempt errored: {e}"
             text = f"{label} was down sir -- {result}"
             print(f"  [AIServices] {text}")
-            _notify_all(text)
+            sms.send_sms(text)
+            jarvis_security.send_alert(text)
             bot_events.publish("ai_service_alert", {"service": key, "text": text})
         _alerted &= down_now
         if pipeline_stop.wait(_AI_SERVICES_CHECK_INTERVAL_SECONDS):
@@ -1080,7 +1088,9 @@ def _security_watcher_thread():
     cycle: it gets a quiet summary after every sweep regardless, and a
     critical finding (a suspicious process, a newly-exposed port, a new LAN
     device, or a newly-flagged dependency) triggers an immediate loud alert
-    (voice/SMS/main-Telegram/JarSecurity/admin-consult).
+    (voice/SMS/JarSecurity/admin-consult) -- deliberately NOT the main
+    Jarvis Telegram bot too; JarSecurity already owns Telegram delivery for
+    this, so duplicating it there would just be noise.
 
     _last_signature dedupes that loud alert the same way
     _ai_services_watcher_thread's _alerted set dedupes restart alerts: a
@@ -1114,7 +1124,7 @@ def _security_watcher_thread():
                 text = f"Security sweep sir: {result}"
                 with _command_lock:
                     speak(text)
-                _notify_all(text)
+                sms.send_sms(text)
                 jarvis_security.send_alert(result)
                 bot_events.publish("security_critical", {"result": result})
                 _consult_admin_on_new_devices()
@@ -1304,10 +1314,44 @@ def _agent_scheduler_thread():
 
 
 def _on_important_email(provider, category, summary):
-    text = f"You've got an important email sir, on {provider}: {summary}"
-    with _command_lock:
-        speak(text)
-    _notify_all(f"[Email - {provider} - {category}] {summary}")
+    """Important-mail alerts are JarvisEmail's job specifically, not the
+    main voice/SMS/command-Telegram channels -- no speak(), no
+    _notify_all(). bot_events still fires so the desktop HUD's activity
+    feed shows it, same as every other watchdog."""
+    bot_events.publish("important_email", {"provider": provider, "category": category, "summary": summary})
+    jarvis_email_bot.send_message(f"[{provider} - {category}] {summary}")
+
+
+_GMAIL_TOKEN_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
+_GMAIL_TOKEN_WARN_AFTER_DAYS = 6
+
+
+def _gmail_token_watcher_thread():
+    """Google's OAuth consent screen for this project is in Testing status
+    (Gmail scopes are 'restricted', so moving to Production requires a
+    real verification review -- not worth it for a single-user personal
+    app, see project history). That means the refresh_token dies after 7
+    days no matter what. This warns once, a day before that, over
+    JarvisEmail specifically -- not voice/SMS/the main bot -- since a dead
+    Gmail token is exactly JarvisEmail's beat."""
+    if not gmail_service.GMAIL_AVAILABLE:
+        return
+    while not pipeline_stop.is_set():
+        try:
+            issued_at, alerted = gmail_service.token_expiry_status()
+            if issued_at and not alerted:
+                age_days = (time.time() - issued_at) / 86400
+                if age_days >= _GMAIL_TOKEN_WARN_AFTER_DAYS:
+                    jarvis_email_bot.send_message(
+                        "Your Gmail/Calendar connection expires soon sir -- Google's 7-day "
+                        "Testing-mode limit. Run `rm token.json` in the Jarvis folder and "
+                        "restart the backend to refresh it before email watching breaks."
+                    )
+                    gmail_service.mark_token_expiry_alerted()
+        except Exception as e:
+            print(f"  [GmailTokenWatch] {e}")
+        if pipeline_stop.wait(_GMAIL_TOKEN_CHECK_INTERVAL_SECONDS):
+            break
 
 
 def _sms_command_thread():
@@ -1522,6 +1566,7 @@ def voice_loop():
     threading.Thread(target=_email_command_thread, daemon=True, name="EmailTelegram").start()
     threading.Thread(target=_outlook_command_thread, daemon=True, name="OutlookTelegram").start()
     threading.Thread(target=_email_watch_thread, daemon=True, name="EmailWatch").start()
+    threading.Thread(target=_gmail_token_watcher_thread, daemon=True, name="GmailTokenWatch").start()
     threading.Thread(target=_network_watch_thread, daemon=True, name="NetworkWatch").start()
     threading.Thread(target=_security_watcher_thread, daemon=True, name="Security").start()
     threading.Thread(target=_deep_security_watcher_thread, daemon=True, name="DeepSecurity").start()
