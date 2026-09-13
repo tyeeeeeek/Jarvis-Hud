@@ -2268,7 +2268,13 @@ def log_deep_scan_result() -> dict:
 _AI_SERVICES = {
     "ollama": {"label": "Ollama", "url": "http://localhost:11434/api/tags",
                "unit": "ollama.service", "container": "ollama"},
-    "prometheus": {"label": "Prometheus", "url": "http://localhost:9090/-/healthy",
+    # Prometheus's systemd unit deliberately binds to this host's own
+    # Tailscale IP only (--web.listen-address=<tailscale ip>:9090, same
+    # trust boundary as Grafana/n8n/Uptime Kuma in this homelab stack), NOT
+    # loopback -- so the health check has to hit that address too, resolved
+    # live rather than hardcoded (see _ai_service_up below), or every single
+    # check falsely reports it down and gets it needlessly restarted.
+    "prometheus": {"label": "Prometheus", "url": "http://{tailscale_ip}:9090/-/healthy",
                    "unit": "prometheus.service", "container": "prometheus"},
 }
 
@@ -2282,9 +2288,23 @@ LAST_AI_SERVICES_RESULT = {}
 def _ai_service_up(entry) -> bool:
     """One fast, lightweight HTTP GET against a service's own health
     endpoint -- never more than a few seconds, so this is cheap enough to
-    call on every watchdog cycle and every dashboard refresh."""
+    call on every watchdog cycle and every dashboard refresh. Resolves a
+    "{tailscale_ip}" placeholder in the URL to this host's actual current
+    Tailscale IP first (see _AI_SERVICES) -- if that can't be resolved,
+    reports down rather than guessing at an address."""
+    url = entry["url"]
+    if "{tailscale_ip}" in url:
+        tailscale_ip = None
+        if tailscale_service.TAILSCALE_AVAILABLE:
+            try:
+                tailscale_ip = tailscale_service.get_status().get("self_ip")
+            except Exception:
+                tailscale_ip = None
+        if not tailscale_ip:
+            return False
+        url = url.format(tailscale_ip=tailscale_ip)
     try:
-        r = requests.get(entry["url"], timeout=4)
+        r = requests.get(url, timeout=4)
         return r.status_code < 500
     except requests.RequestException:
         return False
