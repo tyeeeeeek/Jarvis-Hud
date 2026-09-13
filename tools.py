@@ -84,6 +84,7 @@ import speedtest_service
 import synology_service
 import tailscale_service
 import fleet_service
+import pihole_service
 
 
 HOME = os.path.expanduser("~")
@@ -2600,6 +2601,44 @@ def check_firmware_drivers() -> str:
     return f"Firmware/driver check sir: {note}."
 
 
+def _check_pihole_status():
+    """Read-only Pi-hole stats pull for JarSecurity's sweep -- same
+    report-only philosophy as _check_firmware_and_drivers: never toggles
+    blocking or touches Pi-hole's configuration, just reads today's numbers.
+    Flagged (worth a look) only when blocking is confirmed OFF -- a home
+    network's DNS ad/tracker filtering being disabled is the one Pi-hole
+    condition that's actually security-relevant here; the query/block
+    counts themselves are routine FYI. Returns (summary_text, flagged)."""
+    if not pihole_service.PIHOLE_AVAILABLE:
+        return "not configured -- PIHOLE_APP_PASSWORD missing in .env", False
+    try:
+        status = pihole_service.get_status()
+    except Exception as e:
+        return f"unreachable ({e})", False
+    blocking = status.get("blocking_enabled")
+    queries = status.get("queries_today")
+    blocked = status.get("blocked_today")
+    pct = status.get("percent_blocked")
+    clients = status.get("unique_clients")
+    pct_text = f"{pct:.1f}%" if isinstance(pct, (int, float)) else "?"
+    note = (f"blocking {'ON' if blocking else 'OFF' if blocking is False else 'unknown'}, "
+            f"{blocked if blocked is not None else '?'}/{queries if queries is not None else '?'} "
+            f"queries blocked today ({pct_text}), {clients if clients is not None else '?'} client(s)")
+    return note, blocking is False
+
+
+def check_pihole_status() -> str:
+    """Read-only Pi-hole stats: blocking on/off, queries seen and blocked
+    today, percent blocked, active clients. Never changes anything -- also
+    runs automatically as part of JarSecurity's scheduled sweep. Use this
+    whenever the user asks about Pi-hole, ad blocking, or DNS filtering
+    status."""
+    note, flagged = _check_pihole_status()
+    if flagged:
+        return f"Pi-hole check sir: {note} -- blocking is off."
+    return f"Pi-hole check sir: {note}."
+
+
 def _check_dependency_vulnerabilities():
     """Read-only dependency vulnerability check -- report-only, same
     philosophy as _check_firmware_and_drivers: never upgrades anything
@@ -4255,8 +4294,10 @@ def security_status_report() -> str:
                 f"{len(e.get('suspicious', []))} suspicious process(es), "
                 f"{e.get('new_devices', 0)} new device(s), "
                 f"firmware flagged={e.get('firmware_flagged', False)}, "
+                f"secrets flagged={e.get('secrets_flagged', False)}, "
                 f"uBlock={'ok' if e.get('ublock_ok') else 'issue'}, "
-                f"DuckDuckGo={'ok' if e.get('ddg_ok') else 'issue'}"
+                f"DuckDuckGo={'ok' if e.get('ddg_ok') else 'issue'}, "
+                f"Pi-hole={'blocking off' if e.get('pihole_flagged') else e.get('pihole_note', 'unknown')}"
             )
         # Real per-port detail from the MOST RECENT sweep only -- this is
         # what actually answers "what ports are open"/"which are exposed"

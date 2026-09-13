@@ -456,6 +456,10 @@ machine. Runs immediately on startup, then every 4 hours (see
   it automatically (straight from its own official GitHub releases,
   structurally verified before ever being loaded) if it isn't. Close and
   reopen the browser window after a fresh install for it to take effect.
+- **Pi-hole stats** — pulls today's query/blocking numbers from Pi-hole (see
+  "Pi-hole stats" under Homelab below); flags it as critical only if
+  blocking is confirmed OFF, otherwise folds the numbers into the routine
+  summary. No-op until `PIHOLE_APP_PASSWORD` is set.
 
 After **every** scheduled sweep, it sends a short summary to Telegram. If a
 sweep finds anything **critical** — a suspicious process or a new LAN
@@ -661,6 +665,28 @@ choose so this can never touch anything else on the NAS.
 These calls copy files; they never delete the source, on either side, so "moving" a
 folder today means exporting/importing and then deleting the original yourself if
 you want it gone from one side.
+
+### Pi-hole stats (read-only)
+
+Folds today's Pi-hole ad/tracker-blocking numbers into JarSecurity's periodic
+sweep (`check_pihole_status`, backed by `pihole_service.py`) — blocking on/off,
+queries seen and blocked today, percent blocked, active clients. Blocking
+confirmed OFF is the one condition this flags as "NEEDS ATTENTION" (an alert
+fires through JarSecurity's Telegram bot same as any other critical finding);
+the query counts themselves are routine FYI folded into every sweep summary.
+Read-only — never toggles blocking or touches Pi-hole's config.
+
+1. In Pi-hole's own admin UI: **Settings → API / Web interface → App
+   Password** → generate one. Use this app password, **not** your Pi-hole
+   admin login password — a leaked app password only grants API access, never
+   a browser login to the admin UI.
+2. In `.env`, set:
+   ```
+   PIHOLE_URL=http://10.0.0.5      # your Pi-hole's LAN IP (or Tailscale IP)
+   PIHOLE_APP_PASSWORD=...          # the app password from step 1
+   ```
+3. Restart Jarvis and ask "what's my Pi-hole status" or check the next
+   JarSecurity sweep summary/Telegram message.
 
 ### New-device LAN alerts + internet speed
 
