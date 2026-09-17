@@ -541,11 +541,11 @@ of reporting the former as exposed too for lack of a way to check. Read-only
 — never touches or changes any firewall rule.
 
 ```
-sudo tee /etc/sudoers.d/jarvis-diagnostics <<'EOF'
-tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/smartctl -a /dev/*
-tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/rkhunter --check --sk --nocolors
-tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/lynis audit system --quick --no-colors --no-log --report-file *
-tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/ufw status
+sudo tee /etc/sudoers.d/jarvis-diagnostics <<EOF
+$USER ALL=(root) NOPASSWD: /usr/sbin/smartctl -a /dev/*
+$USER ALL=(root) NOPASSWD: /usr/bin/rkhunter --check --sk --nocolors
+$USER ALL=(root) NOPASSWD: /usr/sbin/lynis audit system --quick --no-colors --no-log --report-file *
+$USER ALL=(root) NOPASSWD: /usr/sbin/ufw status
 EOF
 sudo chmod 0440 /etc/sudoers.d/jarvis-diagnostics
 sudo visudo -c   # confirm it says "parsed OK"
@@ -572,8 +572,8 @@ passwordless sudo isn't set up" message instead of applying anything:
 
 ```
 sudo tee /etc/sudoers.d/jarvis-security-fixes <<EOF
-tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/bash $(pwd)/scripts/jarvis_security_fixes.sh fix_exposed_ollama
-tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/bash $(pwd)/scripts/jarvis_security_fixes.sh fix_exposed_iperf3
+$USER ALL=(root) NOPASSWD: /usr/bin/bash $(pwd)/scripts/jarvis_security_fixes.sh fix_exposed_ollama
+$USER ALL=(root) NOPASSWD: /usr/bin/bash $(pwd)/scripts/jarvis_security_fixes.sh fix_exposed_iperf3
 EOF
 sudo chmod 0440 /etc/sudoers.d/jarvis-security-fixes
 sudo visudo -c   # confirm it says "parsed OK"
@@ -714,7 +714,7 @@ Read-only — never toggles blocking or touches Pi-hole's config.
    a browser login to the admin UI.
 2. In `.env`, set:
    ```
-   PIHOLE_URL=http://10.0.0.5      # your Pi-hole's LAN IP (or Tailscale IP)
+   PIHOLE_URL=http://192.168.1.5   # your Pi-hole's LAN IP (or Tailscale IP)
    PIHOLE_APP_PASSWORD=...          # the app password from step 1
    ```
 3. Restart Jarvis and ask "what's my Pi-hole status" or check the next
@@ -759,9 +759,9 @@ it needs root, same as `system_power`'s shutdown — add a scoped NOPASSWD rule 
 it can happen without a password prompt:
 
 ```
-sudo tee /etc/sudoers.d/jarvis-ai-services <<'EOF'
-tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/systemctl restart ollama.service
-tyler-kennedy ALL=(root) NOPASSWD: /usr/bin/systemctl restart prometheus.service
+sudo tee /etc/sudoers.d/jarvis-ai-services <<EOF
+$USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart ollama.service
+$USER ALL=(root) NOPASSWD: /usr/bin/systemctl restart prometheus.service
 EOF
 sudo chmod 0440 /etc/sudoers.d/jarvis-ai-services
 sudo visudo -c   # confirm it says "parsed OK"
@@ -772,12 +772,15 @@ set up yet" message instead of restarting — never a hang, never a silent no-op
 
 ### Wake-on-LAN (turn a fleet device back on remotely)
 
-Jarvis can wake a sleeping or fully shut-down fleet device (`tyestore`,
-`tyewinpc1`, `tyepc`, `tyewintablet`) by broadcasting a Wake-on-LAN magic packet
-on its own local network — ask "wake up tyewinpc1"/"turn on [device]"
-(`fleet_wake`). Unlike every other Fleet action, this doesn't use SSH at all —
-the whole point is reaching a device that has no SSH server running because
-it's off.
+Jarvis can wake a sleeping or fully shut-down fleet device by broadcasting
+a Wake-on-LAN magic packet on its own local network — ask "wake up
+pc1"/"turn on [device]" (`fleet_wake`). Fleet is Jarvis's optional
+SSH-based remote control of other machines on your tailnet: four fixed
+slots (`nas`, `pc1`, `pc2`, `pc3`), each entirely off until you set its
+`FLEET_<SLOT>_HOST`/`_USER`/`_MAC` in `.env` — see `fleet_service.py`'s
+module docstring for full per-slot setup steps. Unlike every other Fleet
+action, waking a device doesn't use SSH at all — the whole point is
+reaching a device that has no SSH server running because it's off.
 
 Setup, per device:
 1. **BIOS/UEFI** — enable "Wake on LAN" (sometimes named "Power On By PCI-E";

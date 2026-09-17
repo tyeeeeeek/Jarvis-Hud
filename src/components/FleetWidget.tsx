@@ -25,10 +25,10 @@ interface FleetDevice {
 type StatusResult = { ok: true; output: string } | { ok: false; error: string };
 
 const DEVICE_LABELS: Record<string, string> = {
-  tyestore: "TYESTORE (NAS)",
-  tyewinpc1: "TYEWINPC1",
-  tyepc: "TYEPC",
-  tyewintablet: "TYEWINTABLET",
+  nas: "NAS",
+  pc1: "PC1",
+  pc2: "PC2",
+  pc3: "PC3",
 };
 
 function DetailRow({ label, value, bad }: { label: string; value: string; bad?: boolean }) {
@@ -69,8 +69,8 @@ function daysUntil(iso: string | null): number | null {
 // dot HomelabWidget/homepage already show (that's tailscale_service, pure
 // status), but actual curated remote actions via fleet_service's OpenSSH
 // bridge (Tailscale's own SSH server doesn't run under Synology's
-// packaging, so even TyeStore uses OpenSSH-over-Tailscale like the
-// Windows boxes). See fleet_service.py's module docstring for what "not
+// packaging, so even the "nas" slot uses OpenSSH-over-Tailscale like the
+// Windows slots). See fleet_service.py's module docstring for what "not
 // configured yet" means per device and how to fix it.
 export function FleetWidget() {
   const [devices, setDevices] = useState<FleetDevice[]>([]);

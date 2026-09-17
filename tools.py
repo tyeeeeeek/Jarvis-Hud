@@ -2136,7 +2136,7 @@ def run_security_audit() -> str:
     # Fixed filename (not randomized) so the sudoers rules below that read
     # and clean it up can name it exactly, with no wildcard -- this sudo
     # build rejects mid-argument wildcards entirely (see get_disk_health's
-    # smartctl rule). Lives in ~/.jarvis, which only tyler-kennedy can
+    # smartctl rule). Lives in ~/.jarvis, which only your own Linux user can
     # write into, so a fixed path here can't be pre-planted by another
     # local user the way a fixed path in world-writable /tmp could.
     report_path = os.path.join(JARVIS_DIR, "lynis_report.dat")
@@ -2705,7 +2705,7 @@ def _parse_ufw_rules(out):
 def _ufw_status_rules():
     """Live `ufw` rule table, or None if ufw isn't installed/active or we
     don't have passwordless sudo for it (see README's NOPASSWD section --
-    add `tyler-kennedy ALL=(root) NOPASSWD: /usr/sbin/ufw status` the same
+    add `youruser ALL=(root) NOPASSWD: /usr/sbin/ufw status` the same
     way the smartctl/lynis/rkhunter rules are added to enable this check).
     None means "can't verify" -- callers must treat that as NOT restricted,
     same fail-safe-to-exposed default _classify_bind_scope already uses,
@@ -3517,7 +3517,7 @@ def list_fleet_devices() -> str:
 
 def fleet_status(device: str) -> str:
     """Check basic health (uptime, disk, memory) on a named fleet device
-    -- tyestore, tyewinpc1, tyepc, or tyewintablet. Read-only. Use for
+    -- nas, pc1, pc2, or pc3. Read-only. Use for
     "how's [device] doing"/"check on my [device]" requests. Call
     list_fleet_devices first if unsure a device is set up."""
     try:
@@ -3530,8 +3530,8 @@ def fleet_status(device: str) -> str:
 
 
 def fleet_restart(device: str) -> str:
-    """Restart a named Windows fleet device -- tyewinpc1, tyepc, or
-    tyewintablet (not tyestore; no restart action is offered for the
+    """Restart a named Windows fleet device -- pc1, pc2, or
+    pc3 (not nas; no restart action is offered for the
     NAS). Gives it a 60-second warning before restarting, same as this
     machine's own system_power. If JARVIS_ADMIN_BOT_TOKEN is configured,
     first waits for explicit yes/no approval over the dedicated
@@ -3586,7 +3586,7 @@ def fleet_processes(device: str) -> str:
 
 def fleet_docker_status(device: str) -> str:
     """List Docker containers and their status on a named fleet device --
-    currently only tyestore actually runs Docker. Read-only. Use for
+    currently only nas actually runs Docker. Read-only. Use for
     "what containers are running on [device]"/"is [container] up on
     [device]" requests."""
     try:
@@ -3601,7 +3601,7 @@ def fleet_docker_status(device: str) -> str:
 def fleet_docker_restart(device: str, container: str) -> str:
     """Restart one Docker container on a named fleet device. `container`
     must be one of: radarr, sonarr, prowlarr, jellyfin (the media stack
-    on tyestore -- fleet_service.DOCKER_CONTAINERS is the source of
+    on nas -- fleet_service.DOCKER_CONTAINERS is the source of
     truth). If JARVIS_ADMIN_BOT_TOKEN is configured, first waits for
     explicit yes/no approval over the dedicated JarvisAdmin Telegram bot,
     same as fleet_restart -- this call blocks until answered or times
@@ -3758,8 +3758,8 @@ def fleet_app_upgrade(device: str, name_or_id: str) -> str:
 
 def fleet_wake(device: str) -> str:
     """Wake a named fleet device from sleep or a full shutdown --
-    tyestore, tyewinpc1, tyepc, or tyewintablet. Use for "wake up
-    [device]"/"turn on [device]" requests. Needs FLEET_<DEVICE>_MAC set
+    nas, pc1, pc2, or pc3. Use for "wake up
+    [device]"/"turn on [device]" requests. Needs FLEET_<SLOT>_MAC set
     in .env and Wake-on-LAN enabled on that device's BIOS/NIC (see
     fleet_service.py's module docstring) -- returns a clear "not
     configured" message otherwise rather than failing oddly. Not gated by
@@ -3781,8 +3781,8 @@ def fleet_wake(device: str) -> str:
 def fleet_list_dir(device: str, path: str = "") -> str:
     """Lists one directory's contents on a named fleet device -- files
     and folders, with sizes. Read-only. `path` is a real filesystem path
-    on that device (e.g. "C:\\Users\\tyeke\\Desktop" on a Windows box,
-    "/volume1/JarvisSync" on tyestore) -- leave blank for that device's
+    on that device (e.g. "C:\\Users\\yourname\\Desktop" on a Windows box,
+    "/volume1/JarvisSync" on nas) -- leave blank for that device's
     root (C:\\ on Windows, / on Linux). Use for "what's in [folder] on
     [device]"/"show me the files on [device]" requests."""
     try:

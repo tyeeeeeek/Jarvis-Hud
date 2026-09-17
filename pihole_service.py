@@ -15,14 +15,16 @@
 #   login to the admin UI.
 #
 #   Fully inert (PIHOLE_AVAILABLE=False) until PIHOLE_APP_PASSWORD is set
-#   in .env. PIHOLE_URL defaults to this homelab's Pi-hole
-#   (http://10.0.0.5); override if it ever moves.
+#   in .env. PIHOLE_URL defaults to Pi-hole's own standard hostname
+#   (http://pi.hole, which Pi-hole answers for itself once it's your DNS
+#   server) -- set it explicitly to a LAN/Tailscale IP if that doesn't
+#   resolve for you.
 # ================================================================
 import os
 
 import requests
 
-URL = (os.environ.get("PIHOLE_URL", "").strip() or "http://10.0.0.5").rstrip("/")
+URL = (os.environ.get("PIHOLE_URL", "").strip() or "http://pi.hole").rstrip("/")
 APP_PASSWORD = os.environ.get("PIHOLE_APP_PASSWORD", "")
 
 PIHOLE_AVAILABLE = bool(APP_PASSWORD)

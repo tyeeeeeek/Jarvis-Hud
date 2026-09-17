@@ -18,21 +18,28 @@
 #
 #   One transport for every device: "openssh" -- a normal OpenSSH server
 #   reached over the Tailscale network, authenticated with a dedicated
-#   keypair (~/.jarvis/ssh/fleet_key). Originally TyeStore used Tailscale's
-#   own zero-config SSH server instead (no keys needed) -- verified live
-#   that Synology's own Tailscale package explicitly disables that
-#   ("The Tailscale SSH server does not run on Synology"), so it uses
-#   DSM's own OpenSSH server instead, same as everything else here.
+#   keypair (~/.jarvis/ssh/fleet_key). A Synology NAS can't use Tailscale's
+#   own zero-config SSH server for this -- Synology's own Tailscale package
+#   explicitly disables it ("The Tailscale SSH server does not run on
+#   Synology") -- so the "nas" slot below also uses a normal OpenSSH
+#   server, same as every other slot.
+#
+#   There are four fixed device slots -- "nas" (Linux, e.g. a Synology NAS
+#   via DSM) and "pc1"/"pc2"/"pc3" (Windows) -- each fully optional and
+#   configured entirely through .env; see .env.example. Leave a slot's
+#   *_HOST unset and it's simply never offered.
 #
 #   One-time setup per device:
 #
-#     TyeStore (DSM):
+#     nas (DSM):
 #       1. DSM > Control Panel > Terminal & SNMP > Enable SSH service.
 #       2. Add ~/.jarvis/ssh/fleet_key.pub to that DSM user's
 #          ~/.ssh/authorized_keys (chmod 700 ~/.ssh, 600 the file).
-#       3. Set FLEET_TYESTORE_USER in .env to that DSM username.
+#       3. Set FLEET_NAS_HOST (its tailnet hostname, e.g.
+#          "mynas.tailxxxxx.ts.net") and FLEET_NAS_USER (its DSM username)
+#          in .env.
 #
-#     Each Windows box (TyeWinPC1, TyePC, TyeWinTablet):
+#     Each Windows box (pc1, pc2, pc3):
 #       1. Settings > Apps > Optional Features > Add > "OpenSSH Server"
 #          (or: Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0)
 #       2. Start-Service sshd ; Set-Service -Name sshd -StartupType Automatic
@@ -40,7 +47,8 @@
 #          C:\Users\<user>\.ssh\authorized_keys (or, for an admin
 #          account, C:\ProgramData\ssh\administrators_authorized_keys --
 #          Windows ignores the per-user file for admins).
-#       4. Set FLEET_<DEVICE>_USER in .env to the Windows username.
+#       4. Set FLEET_<SLOT>_HOST and FLEET_<SLOT>_USER in .env to that
+#          machine's tailnet hostname and Windows username.
 #
 #   Every action call is a real subprocess/SFTP call with a timeout --
 #   nothing here ever hangs Jarvis's brain waiting on a dead machine.
@@ -68,7 +76,7 @@
 #     3. Linux: `sudo ethtool -s <iface> wol g` (persist across reboots
 #        with a NetworkManager connection setting or a systemd/udev rule,
 #        since a plain ethtool call resets on the next boot).
-#     4. Set FLEET_<DEVICE>_MAC in .env to that NIC's MAC address (Windows:
+#     4. Set FLEET_<SLOT>_MAC in .env to that NIC's MAC address (Windows:
 #        `Get-NetAdapter`; Linux: `ip link`) -- must be the wired Ethernet
 #        adapter's address, not Wi-Fi. Wi-Fi Wake-on-LAN support is rare
 #        and unreliable (most USB/many built-in Wi-Fi adapters don't
@@ -88,13 +96,21 @@ import network_watch
 
 FLEET_KEY_PATH = os.path.expanduser("~/.jarvis/ssh/fleet_key")
 
+# Per-slot tailnet hostnames -- e.g. "mynas.tailxxxxx.ts.net" (Tailscale
+# admin console > Machines, or `tailscale status` on the target). Blank
+# until set in .env; a slot with no host is simply not offered.
+_NAS_HOST = os.environ.get("FLEET_NAS_HOST", "").strip()
+_PC1_HOST = os.environ.get("FLEET_PC1_HOST", "").strip()
+_PC2_HOST = os.environ.get("FLEET_PC2_HOST", "").strip()
+_PC3_HOST = os.environ.get("FLEET_PC3_HOST", "").strip()
+
 # SSH usernames -- device-specific since they can differ. Blank until set
 # in .env; devices needing OpenSSH just report "not configured" until
 # then rather than guessing a username.
-_TYESTORE_USER = os.environ.get("FLEET_TYESTORE_USER", "").strip()
-_TYEWINPC1_USER = os.environ.get("FLEET_TYEWINPC1_USER", "").strip()
-_TYEPC_USER = os.environ.get("FLEET_TYEPC_USER", "").strip()
-_TYEWINTABLET_USER = os.environ.get("FLEET_TYEWINTABLET_USER", "").strip()
+_NAS_USER = os.environ.get("FLEET_NAS_USER", "").strip()
+_PC1_USER = os.environ.get("FLEET_PC1_USER", "").strip()
+_PC2_USER = os.environ.get("FLEET_PC2_USER", "").strip()
+_PC3_USER = os.environ.get("FLEET_PC3_USER", "").strip()
 
 # Wake-on-LAN target MACs -- independent of the SSH username above (wake()
 # never uses SSH), and independent per device since not every device needs
@@ -113,22 +129,21 @@ def _normalize_mac(raw: str):
     return raw.replace("-", ":").lower()
 
 
-_TYESTORE_MAC = _normalize_mac(os.environ.get("FLEET_TYESTORE_MAC", ""))
-_TYEWINPC1_MAC = _normalize_mac(os.environ.get("FLEET_TYEWINPC1_MAC", ""))
-_TYEPC_MAC = _normalize_mac(os.environ.get("FLEET_TYEPC_MAC", ""))
-_TYEWINTABLET_MAC = _normalize_mac(os.environ.get("FLEET_TYEWINTABLET_MAC", ""))
+_NAS_MAC = _normalize_mac(os.environ.get("FLEET_NAS_MAC", ""))
+_PC1_MAC = _normalize_mac(os.environ.get("FLEET_PC1_MAC", ""))
+_PC2_MAC = _normalize_mac(os.environ.get("FLEET_PC2_MAC", ""))
+_PC3_MAC = _normalize_mac(os.environ.get("FLEET_PC3_MAC", ""))
 
 FLEET_DEVICES = {
-    "tyestore": {"host": "tyestore.tail8bdaa1.ts.net", "os": "linux", "user": _TYESTORE_USER, "mac": _TYESTORE_MAC},
-    "tyewinpc1": {"host": "tyewinpc1.tail8bdaa1.ts.net", "os": "windows", "user": _TYEWINPC1_USER, "mac": _TYEWINPC1_MAC},
-    "tyepc": {"host": "tyepc.tail8bdaa1.ts.net", "os": "windows", "user": _TYEPC_USER, "mac": _TYEPC_MAC},
-    "tyewintablet": {"host": "tyewintablet.tail8bdaa1.ts.net", "os": "windows", "user": _TYEWINTABLET_USER, "mac": _TYEWINTABLET_MAC},
+    "nas": {"host": _NAS_HOST, "os": "linux", "user": _NAS_USER, "mac": _NAS_MAC},
+    "pc1": {"host": _PC1_HOST, "os": "windows", "user": _PC1_USER, "mac": _PC1_MAC},
+    "pc2": {"host": _PC2_HOST, "os": "windows", "user": _PC2_USER, "mac": _PC2_MAC},
+    "pc3": {"host": _PC3_HOST, "os": "windows", "user": _PC3_USER, "mac": _PC3_MAC},
 }
 
-# The only containers docker_restart will ever touch -- matches the media
-# stack actually running on TyeStore (see homelab/homepage/config/
-# services.yaml's "NAS — tyestore" group). Never accepts an arbitrary
-# container name.
+# The only containers docker_restart will ever touch -- matches a typical
+# self-hosted media stack. Never accepts an arbitrary container name; edit
+# this list to match what actually runs on your "nas" slot.
 DOCKER_CONTAINERS = ["radarr", "sonarr", "prowlarr", "jellyfin"]
 
 # Curated actions, per OS -- the only commands that will ever run on a
@@ -143,7 +158,7 @@ _ACTIONS_LINUX = {
     # DSM don't inherit the interactive shell's PATH, which is where the
     # ContainerManager package adds /usr/local/bin. "sudo -n" (no password
     # prompt) requires a matching NOPASSWD sudoers entry for the SSH user --
-    # see PORT_TO_LINUX.md / setup notes for the exact line to add on tyestore.
+    # see PORT_TO_LINUX.md / setup notes for the exact line to add on your NAS.
     "docker_status": "sudo -n /usr/local/bin/docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}'",
     "docker_restart": None,  # placeholder so it appears in the action list; real command built in run_action
     # Emergency network isolation for tools.trigger_lockdown() -- takes this
@@ -216,7 +231,7 @@ def list_devices():
         out.append({
             "name": name,
             "os": dev["os"],
-            "configured": bool(dev["user"]),
+            "configured": bool(dev["user"] and dev["host"]),
             "actions": sorted(_ACTIONS_BY_OS[dev["os"]]),
         })
     return out
@@ -230,10 +245,11 @@ def _require_configured(device: str):
     dev = FLEET_DEVICES.get(device)
     if not dev:
         raise RuntimeError(f"'{device}' isn't a known fleet device. Known devices: {', '.join(FLEET_DEVICES)}.")
-    if not dev["user"]:
+    if not dev["user"] or not dev["host"]:
         raise RuntimeError(
-            f"{device} isn't configured yet -- set FLEET_{device.upper()}_USER in .env "
-            f"to its SSH username, once its OpenSSH server is enabled and "
+            f"{device} isn't configured yet -- set FLEET_{device.upper()}_HOST and "
+            f"FLEET_{device.upper()}_USER in .env (its tailnet hostname and SSH "
+            f"username), once its OpenSSH server is enabled and "
             f"~/.jarvis/ssh/fleet_key.pub is in its authorized_keys."
         )
     if not os.path.isfile(FLEET_KEY_PATH):
