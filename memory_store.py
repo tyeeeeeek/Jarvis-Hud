@@ -8,9 +8,7 @@
 #   ranked recall without needing an embeddings model or a vector DB.
 #   "Good enough" semantic-ish search, not real semantic search -- a
 #   deliberate simplicity tradeoff, consistent with this project's
-#   existing preference for cheap/local/no-new-dependency solutions
-#   (e.g. email_watcher.py's classify-with-local-Ollama pattern, which
-#   maybe_capture() below reuses directly).
+#   existing preference for cheap/local/no-new-dependency solutions.
 #
 #   Two ways something gets remembered:
 #     - Explicit: tools.remember_this(text) -- "Jarvis, remember that ..."

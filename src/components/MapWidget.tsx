@@ -58,7 +58,7 @@ const MAPILLARY_TOKEN = import.meta.env.VITE_MAPILLARY_TOKEN as string | undefin
 // too long for the small HUD location chip. First two comma-separated
 // parts read as a real short place name in both cases (voice-command
 // targets and search results alike, since voice targets are usually
-// already short like "Bethel, CT" -- slicing a 2-part name is a no-op).
+// already short like "Los Angeles, CA" -- slicing a 2-part name is a no-op).
 function shortName(name: string): string {
   return name.split(",").slice(0, 2).join(",").trim();
 }

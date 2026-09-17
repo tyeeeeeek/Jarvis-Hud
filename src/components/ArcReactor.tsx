@@ -4,18 +4,10 @@ import { animate as animeAnimate, stagger as animeStagger } from "animejs";
 import { WeatherWidget } from "./WeatherWidget";
 import { AuroraField } from "./AuroraField";
 import { TimeWidget } from "./TimeWidget";
-import { FinanceWidget } from "./FinanceWidget";
-import { HomelabWidget } from "./HomelabWidget";
-import { FleetWidget } from "./FleetWidget";
 import { JarvisCore } from "./JarvisCore";
-import { PcInternals, type PcHealth } from "./PcInternals";
 import { JarvisConsole, type LogEntry } from "./JarvisConsole";
-import { VisionWidget, type VisionEntry } from "./VisionWidget";
-import { CameraFeedWidget } from "./CameraFeedWidget";
 import { MapWidget, type MapTarget } from "./MapWidget";
-import { CameraFocusView } from "./CameraFocusView";
 import { HudPage } from "./HudPage";
-import { CreationPanel, type Creation } from "./CreationPanel";
 import { useScramble } from "../hooks/useScramble";
 import { isMuted, playRespond, playWake, setMuted, startThinking, stopThinking } from "../sound";
 import "./ArcReactor.css";
@@ -23,21 +15,15 @@ import "./ArcReactor.css";
 const MAX_LOG_ENTRIES = 8;
 const MAX_VISION_ENTRIES = 6;
 
-type PageId = "weather" | "time" | "jarvisConsole" | "finance" | "homelab" | "fleet" | "vision" | "cameraFeed" | "map" | "jarvisCore" | "pcInternals";
+type PageId = "weather" | "time" | "jarvisConsole" | "map" | "jarvisCore";
 
 // Order here is the dock's left-to-right order too.
 const PAGE_LABELS: Record<PageId, string> = {
   weather: "Weather",
   time: "Time",
-  finance: "Finance",
-  homelab: "Homelab",
-  fleet: "Fleet",
   jarvisConsole: "Jarvis Console",
-  vision: "Phone Vision",
-  cameraFeed: "Phone Camera",
   map: "Map",
   jarvisCore: "Jarvis Core",
-  pcInternals: "PC Internals",
 };
 const DOCK_ORDER = Object.keys(PAGE_LABELS) as PageId[];
 
@@ -50,15 +36,9 @@ const ICON_PROPS = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", 
 const DOCK_ICONS: Record<PageId, React.ReactNode> = {
   weather: <svg {...ICON_PROPS}><path d="M7 18a4.5 4.5 0 0 1-.5-8.98A5.5 5.5 0 0 1 17.3 8.02 4 4 0 0 1 17 16H7Z" /></svg>,
   time: <svg {...ICON_PROPS}><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></svg>,
-  finance: <svg {...ICON_PROPS}><path d="M4 19h16" /><path d="M7 19v-5M12 19V8M17 19v-9" /></svg>,
-  homelab: <svg {...ICON_PROPS}><rect x="4.5" y="4" width="15" height="6" rx="1.2" /><rect x="4.5" y="14" width="15" height="6" rx="1.2" /><path d="M8 7h.01M8 17h.01" /></svg>,
-  fleet: <svg {...ICON_PROPS}><circle cx="12" cy="5.5" r="2" /><circle cx="5.5" cy="17" r="2" /><circle cx="18.5" cy="17" r="2" /><path d="M12 7.5v3M10.6 12.7 7 15.3M13.4 12.7 17 15.3" /></svg>,
   jarvisConsole: <svg {...ICON_PROPS}><path d="M12 3v4M8 5.5v3M16 5.5v3" /><rect x="5" y="9" width="14" height="9" rx="3" /><path d="M9.5 21h5" /></svg>,
-  vision: <svg {...ICON_PROPS}><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" /><circle cx="12" cy="12" r="2.6" /></svg>,
-  cameraFeed: <svg {...ICON_PROPS}><path d="M4 8.5a1.5 1.5 0 0 1 1.5-1.5h2l1.2-2h6.6l1.2 2h2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5Z" /><circle cx="12" cy="13" r="3.2" /></svg>,
   map: <svg {...ICON_PROPS}><path d="M9 4 4 6v14l5-2 6 2 5-2V4l-5 2-6-2Z" /><path d="M9 4v14M15 6v14" /></svg>,
   jarvisCore: <svg {...ICON_PROPS}><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3" /><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2" /></svg>,
-  pcInternals: <svg {...ICON_PROPS}><rect x="7" y="7" width="10" height="10" rx="1" /><path d="M9 3v2M12 3v2M15 3v2M9 19v2M12 19v2M15 19v2M3 9h2M3 12h2M3 15h2M19 9h2M19 12h2M19 15h2" /></svg>,
 };
 
 // Magnetic hover: the icon leans slightly toward the cursor within its own
@@ -136,25 +116,10 @@ interface JarvisMsg {
   type: string;
   value?: any;
   text?: string;
-  title?: string;
-  kind?: string;
-  html?: string;
-  url?: string;
-  question?: string;
-  answer?: string;
-  image?: string | null;
-  x?: number;
-  y?: number;
-  pinching?: boolean;
-  active?: boolean;
   location?: string;
   country?: string;
   lat?: number;
   lon?: number;
-  cpu_pct?: number;
-  mem_pct?: number;
-  disk_pct?: number;
-  temp_c?: number | null;
 }
 
 /**
@@ -175,7 +140,7 @@ interface JarvisMsg {
  * no relationship to each other -- the opposite of what a HUD should
  * read as. Nothing about the underlying data changed, only how it's
  * presented: every page below is the exact same content component
- * (WeatherWidget, FinanceWidget, ...) this file always rendered, just
+ * (WeatherWidget, TimeWidget, ...) this file always rendered, just
  * shown one at a time inside a single full page rather than eight
  * always-on cards.
  */
@@ -185,17 +150,9 @@ export default function ArcReactor() {
   const [jarvisStatus, setJarvisStatus] = useState("idle");
   const [jarvisSpeaking, setJarvisSpeaking] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
-  const [visionLog, setVisionLog] = useState<VisionEntry[]>([]);
-  const [cameraFrame, setCameraFrame] = useState<string | null>(null);
-  const [creations, setCreations] = useState<Creation[]>([]);
   const [wakeFlash, setWakeFlash] = useState(false);
   const [barVisible, setBarVisible] = useState(false);
   const [muted, setMutedState] = useState(isMuted);
-  const [cameraFocusDismissed, setCameraFocusDismissed] = useState(false);
-  // Same "keep mounted one beat longer to play the reverse animation"
-  // trick as closingPage, for the camera's own full-screen takeover.
-  const [cameraClosing, setCameraClosing] = useState(false);
-  const cameraClosingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [activePage, setActivePage] = useState<PageId | null>(null);
   // The page mid-close-animation, if any -- see CLOSE_ANIM_MS. Lets the
   // panel keep rendering (and play its reverse animation) for one beat
@@ -203,15 +160,11 @@ export default function ArcReactor() {
   const [closingPage, setClosingPage] = useState<PageId | null>(null);
   const closingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pageOrigin, setPageOrigin] = useState<{ x: number; y: number } | null>(null);
-  const [handCursor, setHandCursor] = useState<{ x: number; y: number; pinching: boolean } | null>(null);
   const [mapTarget, setMapTarget] = useState<MapTarget | null>(null);
   const [radarRequest, setRadarRequest] = useState<{ target: MapTarget | null; nonce: number } | null>(null);
   const radarNonceRef = useRef(0);
-  const [pcHealth, setPcHealth] = useState<PcHealth | null>(null);
 
   const logIdRef = useRef(0);
-  const visionIdRef = useRef(0);
-  const creationIdRef = useRef(0);
   const pushLog = (kind: LogEntry["kind"], text: string) => {
     if (!text) return;
     setLog(prev => [...prev, { id: logIdRef.current++, kind, text }].slice(-MAX_LOG_ENTRIES));
@@ -259,34 +212,8 @@ export default function ArcReactor() {
     setMuted(next);
   };
 
-  // Each new phone camera session (null -> a real frame) re-enters the
-  // full-screen focus view automatically, even if a previous session had
-  // been minimized -- otherwise a fresh "Jarvis, are you there?" on the
-  // phone would silently do nothing visible on the desktop. Opening the
-  // camera also drops whatever page was open -- the camera view is
-  // full-bleed and shouldn't be fighting a page panel for the screen.
-  const prevCameraFrameRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (cameraFrame && !prevCameraFrameRef.current) {
-      setCameraFocusDismissed(false);
-      setActivePage(null);
-      if (cameraClosingTimerRef.current) { clearTimeout(cameraClosingTimerRef.current); cameraClosingTimerRef.current = null; }
-      setCameraClosing(false);
-    }
-    prevCameraFrameRef.current = cameraFrame;
-  }, [cameraFrame]);
-  const cameraFocusActive = !!cameraFrame && !cameraFocusDismissed;
-  const minimizeCamera = () => {
-    setCameraClosing(true);
-    if (cameraClosingTimerRef.current) clearTimeout(cameraClosingTimerRef.current);
-    cameraClosingTimerRef.current = setTimeout(() => setCameraClosing(false), CLOSE_ANIM_MS);
-    setCameraFocusDismissed(true);
-  };
-  useEffect(() => () => { if (cameraClosingTimerRef.current) clearTimeout(cameraClosingTimerRef.current); }, []);
-
   const openPage = (id: PageId, origin?: { x: number; y: number }) => {
     if (activePage === id) { closePage(); return; } // tapping the open page's own dock icon closes it
-    setCameraFocusDismissed(true); // stepping into a page always steps out of the camera view
     // Switching straight to a different page: the panel itself stays
     // mounted throughout (only its body content swaps), so cancel any
     // in-flight close animation rather than letting it finish pointlessly.
@@ -306,13 +233,6 @@ export default function ArcReactor() {
   useEffect(() => () => { if (closingTimerRef.current) clearTimeout(closingTimerRef.current); }, []);
 
   const onDockClick = (id: PageId, e: React.MouseEvent<HTMLButtonElement>) => {
-    if (id === "cameraFeed" && cameraFrame) {
-      // The camera's "page" IS the full-screen focus view -- reopen that
-      // instead of the generic page panel if a live frame already exists.
-      setActivePage(null);
-      setCameraFocusDismissed(false);
-      return;
-    }
     const rect = e.currentTarget.getBoundingClientRect();
     openPage(id, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
   };
@@ -374,28 +294,6 @@ export default function ArcReactor() {
     return () => cancelAnimationFrame(frame);
   }, [jarvisSpeaking]);
 
-  // Gesture control, repurposed: with nothing free-floating left to grab
-  // and drag, a pinch now selects whichever dock icon the cursor is
-  // currently over -- "point at it and pinch" is the natural gesture
-  // equivalent of a click in this single-focus layout.
-  const wasPinchingRef = useRef(false);
-  useEffect(() => {
-    if (!handCursor) { wasPinchingRef.current = false; return; }
-    if (handCursor.pinching && !wasPinchingRef.current) {
-      for (const id of DOCK_ORDER) {
-        const el = dockRefs.current[id];
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (handCursor.x >= r.left && handCursor.x <= r.right && handCursor.y >= r.top && handCursor.y <= r.bottom) {
-          openPage(id, { x: r.left + r.width / 2, y: r.top + r.height / 2 });
-          break;
-        }
-      }
-    }
-    wasPinchingRef.current = handCursor.pinching;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handCursor]);
-
   useEffect(() => {
     let cancelled = false;
 
@@ -428,24 +326,6 @@ export default function ArcReactor() {
           case "activity":
             if (data.text) pushLog("activity", data.text);
             break;
-          case "vision_qa":
-            if (data.answer) {
-              setVisionLog(prev => [
-                ...prev,
-                { id: visionIdRef.current++, question: data.question ?? "", answer: data.answer ?? "" },
-              ].slice(-MAX_VISION_ENTRIES));
-            }
-            break;
-          case "camera_frame":
-            setCameraFrame(data.image ?? null);
-            break;
-          case "hand_gesture":
-            if (data.active === false || typeof data.x !== "number" || typeof data.y !== "number") {
-              setHandCursor(null);
-            } else {
-              setHandCursor({ x: data.x * window.innerWidth, y: data.y * window.innerHeight, pinching: !!data.pinching });
-            }
-            break;
           case "show_map":
             if (typeof data.lat === "number" && typeof data.lon === "number") {
               setMapTarget({ lat: data.lat, lon: data.lon, name: data.location || "" });
@@ -464,27 +344,9 @@ export default function ArcReactor() {
             setWakeFlash(true);
             setTimeout(() => setWakeFlash(false), 400);
             break;
-          case "pc_health":
-            if (typeof data.cpu_pct === "number") {
-              setPcHealth({
-                cpuPct: data.cpu_pct, memPct: data.mem_pct ?? 0,
-                diskPct: data.disk_pct ?? 0, tempC: data.temp_c ?? null,
-              });
-            }
-            break;
           case "response":
             if (data.text) pushLog("said", data.text);
             break;
-          case "creation_ready": {
-            const id = creationIdRef.current++;
-            setCreations(prev => [...prev, {
-              id, title: data.title ?? "Untitled",
-              kind: data.kind ?? "dashboard",
-              html: data.html ?? "",
-              url: data.url ?? undefined,
-            }]);
-            break;
-          }
           default:
             break;
         }
@@ -494,8 +356,6 @@ export default function ArcReactor() {
 
       ws.onclose = () => {
         setJarvisConnected(false);
-        setCameraFrame(null); // don't show a frame that might now be stale/stuck
-        setHandCursor(null);
         wsRef.current = null;
         if (!cancelled) {
           reconnectTimerRef.current = setTimeout(connect, 3000);
@@ -521,29 +381,16 @@ export default function ArcReactor() {
   const scrambledHoloText = useScramble("J.A.R.V.I.S", 22);
 
   const reactorDataStatus = (jarvisSpeaking ? "speaking" : jarvisStatus).toLowerCase();
-  // Minimize-to-corner only applies to the page-open case -- CameraFocusView
-  // renders its own self-contained ring badge (see its onMinimize control),
-  // so showing the main ring too during camera focus would just be two
-  // identical rings on screen at once. The main ring (dock included) hides
-  // outright instead while the camera view owns the screen. Stays
-  // minimized through closingPage too, so the ring doesn't snap back to
-  // center a beat before the panel has actually finished animating away.
-  // A creation (Jarvis "build me a website of..." etc) also takes the
-  // whole window over, same as a page -- the ring minimizes for that too.
-  const minimized = activePage !== null || closingPage !== null || creations.length > 0;
+  // Minimize-to-corner applies whenever a page is open (or mid-close-
+  // animation, via closingPage) -- see CLOSE_ANIM_MS.
+  const minimized = activePage !== null || closingPage !== null;
   const displayedPage = activePage ?? closingPage;
 
   const pageContent: Partial<Record<PageId, React.ReactNode>> = {
     weather: <WeatherWidget />,
     time: <TimeWidget />,
-    finance: <FinanceWidget />,
-    homelab: <HomelabWidget />,
-    fleet: <FleetWidget />,
     jarvisCore: <JarvisCore />,
-    pcInternals: <PcInternals health={pcHealth} />,
     jarvisConsole: <JarvisConsole status={jarvisStatus} log={log} connected={jarvisConnected} />,
-    vision: <VisionWidget entries={visionLog} />,
-    cameraFeed: <CameraFeedWidget frame={cameraFrame} />,
     map: <MapWidget target={mapTarget} radarRequest={radarRequest} onClose={closePage} />,
   };
 
@@ -554,7 +401,7 @@ export default function ArcReactor() {
 
       <div className="hud-reveal">
         <div
-          className={`arc-reactor ${wakeFlash ? "arc-reactor--wake-flash" : ""} ${minimized ? "arc-reactor--minimized" : ""} ${(cameraFocusActive || cameraClosing) ? "arc-reactor--hidden" : ""}`}
+          className={`arc-reactor ${wakeFlash ? "arc-reactor--wake-flash" : ""} ${minimized ? "arc-reactor--minimized" : ""}`}
           ref={containerRef}
           data-status={reactorDataStatus}
         >
@@ -585,29 +432,7 @@ export default function ArcReactor() {
         </div>
       </div>
 
-      {/* Camera focus flow: the phone's live feed takes over full-screen
-          the moment cameraFrame arrives, with the ring shrinking to a
-          corner mark (via .arc-reactor--minimized above) rather than
-          being replaced by a separate element -- clicking it (or the
-          ring) returns home; the phone's stream itself is unaffected
-          either way. */}
-      {(cameraFocusActive || cameraClosing) && cameraFrame && (
-        <CameraFocusView frame={cameraFrame} closing={!cameraFocusActive} onMinimize={minimizeCamera} />
-      )}
-
-      {/* Hand-gesture cursor -- the translucent ring that follows the
-          phone's tracked hand position, matching the reference video's
-          gesture-control visual. Turns solid/brighter while pinching;
-          pinching over a dock icon opens that page (see the effect
-          above) since there's nothing left to drag in this layout. */}
-      {handCursor && (
-        <div
-          className={`gesture-cursor ${handCursor.pinching ? "gesture-cursor--pinching" : ""}`}
-          style={{ left: `${handCursor.x}px`, top: `${handCursor.y}px` } as React.CSSProperties}
-        />
-      )}
-
-      {displayedPage && !cameraFocusActive && creations.length === 0 && (
+      {displayedPage && (
         <HudPage
           title={PAGE_LABELS[displayedPage]}
           origin={pageOrigin}
@@ -617,16 +442,6 @@ export default function ArcReactor() {
         >
           {pageContent[displayedPage]}
         </HudPage>
-      )}
-
-      {/* Only the most recent creation renders -- each one is a full-window
-          takeover just like a page, so stacking several at once would just
-          mean the older ones sit invisibly underneath doing nothing. */}
-      {creations.length > 0 && (
-        <CreationPanel
-          creation={creations[creations.length - 1]}
-          onClose={(id) => setCreations(prev => prev.filter(cr => cr.id !== id))}
-        />
       )}
 
       {(window as any).electronAPI && (

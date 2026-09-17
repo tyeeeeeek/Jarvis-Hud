@@ -1,16 +1,14 @@
 # ================================================================
-#   J.A.R.V.I.S — shared bot event bus
+#   J.A.R.V.I.S — shared event bus
 #
-#   Minimal in-process pub/sub shared by every sub-agent thread (the
-#   watchdogs, the employee worker, Telegram command handling) running
-#   inside jarvis.py's one long-lived process. This is deliberately NOT a
-#   network channel and grants no new capability -- every Telegram bot
-#   still has its own isolated token/chat (see telegram_common.py's module
-#   docstring), a leaked one still can't see another's traffic. This bus
-#   only carries already-public-to-the-user information (the same alerts/
-#   status each bot already sends over Telegram) so "bots consulting each
-#   other" -- and the future phone dashboard's live feed -- have one
-#   shared place to plug into instead of a new transport per pair.
+#   Minimal in-process pub/sub used to bridge a voice-triggered tool call
+#   (e.g. show_map/show_weather_radar in tools.py) into jarvis.py's own
+#   WebSocket feed to the desktop HUD, without tools.py needing to import
+#   jarvis.py itself (which would be a circular import). Deliberately NOT
+#   a network channel -- just in-process pub/sub. If you add your own
+#   background watchers/integrations, this is a ready-made place for them
+#   to publish updates the HUD (or anything else you subscribe) should
+#   react to, instead of wiring a new one-off callback per pair.
 # ================================================================
 import threading
 import time

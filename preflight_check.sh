@@ -54,12 +54,12 @@ check claude
 if command -v claude >/dev/null 2>&1; then
   claude --version
   echo "  Run 'claude auth status' (or just 'claude' interactively) to confirm this"
-  echo "  install is authenticated -- it's a separate login from the Windows machine."
+  echo "  install is authenticated."
 fi
 
 echo ""
 if [ "$ok" -eq 1 ]; then
-  echo "=== Core tools present. Review any [WARNING] lines above, then continue with PORT_TO_LINUX.md's setup steps. ==="
+  echo "=== Core tools present. Review any [WARNING] lines above, then continue with README.md's setup steps. ==="
 else
   echo "=== Missing core tools listed above -- install those first. ==="
 fi

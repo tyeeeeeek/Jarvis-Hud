@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 
-// Pinned explicitly to Eastern time -- not just inherited from whatever
-// timezone the OS happens to be set to, so it stays correct even if that
-// ever changes. Bethel, CT is on the same Eastern zone as before.
-const TIME_ZONE = "America/New_York";
+// ─── Edit these to your location ──────────────────────────────────────────
+// Leave TIME_ZONE as undefined to use this machine's own local timezone
+// (the common case), or pin it explicitly (e.g. "America/New_York") if you
+// want the clock to stay correct even if the OS timezone ever changes.
+const TIME_ZONE: string | undefined = undefined;
+const LOCATION_LABEL = "LOS ANGELES, CA";
 
 const WORLD_CLOCKS: { label: string; tz: string }[] = [
   { label: "LOS ANGELES", tz: "America/Los_Angeles" },
@@ -32,7 +34,7 @@ export function TimeWidget() {
   return (
     <>
       <div className="w-header">
-        <span className="w-label">BETHEL, CT</span>
+        <span className="w-label">{LOCATION_LABEL}</span>
       </div>
       <div className="w-clock-row">
         <span className="w-clock">

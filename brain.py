@@ -35,7 +35,7 @@ VENV_PYTHON = os.path.join(
 MCP_SERVER_SCRIPT = os.path.join(_HERE, "jarvis_mcp_server.py")
 MCP_CONFIG_PATH = os.path.join(tempfile.gettempdir(), "jarvis_mcp_config.json")
 
-TIMEOUT_SECS = 900  # generous -- build_creation/self_improve can each take up to 600s
+TIMEOUT_SECS = 900  # generous headroom for a slow tool call (e.g. a cold web search)
 
 PERSONA = (
     "You are J.A.R.V.I.S, a capable voice assistant with real tools to "
@@ -52,8 +52,7 @@ PERSONA = (
     "references like \"it\" or \"that\", but never read the recap back to "
     "the user or mention that you were given one. You're also given the "
     "current real date and time before each request -- use it to resolve "
-    "relative dates (\"tomorrow\", \"next Friday\", \"in an hour\") into "
-    "real ISO 8601 datetimes for tools like create_calendar_event, but "
+    "relative references (\"tomorrow\", \"next Friday\") when relevant, but "
     "never read it back to the user unless they actually asked the time."
 )
 
@@ -72,52 +71,19 @@ def _ensure_mcp_config():
 _CAPTION_OVERRIDES = {
     "play_youtube": lambda a: f"Searching YouTube for {a.get('query', 'that')}",
     "youtube_control": lambda a: "Controlling YouTube playback",
-    "build_creation": lambda a: f"Building {a.get('description', 'that')}",
-    "self_improve": lambda a: f"Working on improving {a.get('focus', 'myself')} -- this may take a few minutes",
     "get_weather": lambda a: f"Checking the weather in {a.get('city', 'your area')}",
-    "ask_claude_web": lambda a: "Researching that",
     "open_website": lambda a: f"Opening {a.get('target', 'that')}",
     "search_web": lambda a: f"Searching for {a.get('query', 'that')}",
+    "read_webpage": lambda a: "Reading that page",
+    "scan_url_safety": lambda a: "Checking that link",
     "launch_app": lambda a: f"Opening {a.get('name', 'that')}",
     "close_app": lambda a: f"Closing {a.get('name', 'that')}",
-    "create_folder": lambda a: f"Creating a folder named {a.get('name', 'that')}",
-    "create_file": lambda a: f"Creating {a.get('name', 'that')}",
-    "delete_item": lambda a: f"Sending {a.get('name', 'that')} to the recycle bin",
-    "list_directory": lambda a: f"Checking your {a.get('location', 'files')}",
-    "read_text_file": lambda a: f"Reading {a.get('name', 'that file')}",
-    "sync_bank_data": lambda a: "Syncing your bank data",
-    "get_spending_summary": lambda a: "Pulling up your spending",
-    "describe_screen": lambda a: "Taking a look",
-    "set_reminder": lambda a: "Setting that reminder",
-    "add_note": lambda a: "Saving that note",
     "remember_this": lambda a: "Remembering that",
     "recall_memory": lambda a: "Checking my memory",
-    "list_notes": lambda a: "Pulling up your notes",
-    "draft_email": lambda a: "Drafting that email",
-    "create_calendar_event": lambda a: f"Adding {a.get('title', 'that')} to your calendar",
-    "check_disk_space": lambda a: "Checking disk space",
-    "clean_disk": lambda a: "Cleaning up disk space",
     "media_control": lambda a: "Adjusting playback",
     "close_browser": lambda a: "Closing the browser",
-    "run_diagnostic_command": lambda a: f"Running {a.get('command', 'that')} diagnostic",
-    "get_financial_insights": lambda a: "Pulling together financial insights",
-    "get_nas_status": lambda a: "Checking the NAS",
-    "check_internet_speed": lambda a: "Running a speed test -- this takes a bit",
-    "scan_network": lambda a: "Scanning the network",
-    "get_tailscale_status": lambda a: "Checking the tailnet",
-    "tailscale_ping": lambda a: f"Pinging {a.get('device', 'that')} over Tailscale",
-    "set_tailscale_exit_node": lambda a: "Changing the exit node",
-    "tailscale_connect": lambda a: "Connecting Tailscale",
-    "tailscale_disconnect": lambda a: "Disconnecting Tailscale",
-    "build_finance_dashboard": lambda a: "Building your finance dashboard",
-    "hire_employee": lambda a: f"Putting a {a.get('role', 'someone')} on it",
-    "list_employees": lambda a: "Checking on the team",
-    "system_power": lambda a: (
-        "Cancelling the pending shutdown" if a.get("action") == "cancel"
-        else f"Restarting the PC{'' if float(a.get('delay_minutes', 1) or 0) == 0 else ' shortly'}"
-        if a.get("action") == "restart"
-        else f"Shutting down the PC{'' if float(a.get('delay_minutes', 1) or 0) == 0 else ' shortly'}"
-    ),
+    "show_map": lambda a: f"Pulling up {a.get('location', 'that')}",
+    "show_weather_radar": lambda a: "Showing the radar",
 }
 
 
@@ -134,28 +100,18 @@ def _caption_for(name, args, meta_display_name):
     return short.replace("_", " ").capitalize()
 
 
-def run_agent(command, on_activity=None, on_creation=None, on_process=None, channel_hint=None):
+def run_agent(command, on_activity=None, on_process=None):
     """Run one voice command through the Claude tool-calling brain.
-
-    channel_hint: an optional plain-text line of context about which
-    dedicated bot channel this request arrived on (see jarvis.py's
-    handle_command `default_provider` param) -- e.g. told apart from
-    `command` itself so a provider steer never gets logged/recalled as
-    something the user actually said.
 
     on_activity(text): called as soon as each tool call starts (before it
         finishes), for live HUD feedback.
-    on_creation(payload): called with the parsed build_creation tool result
-        dict ({"ok", "kind", "title", "path"}) the moment it's available,
-        without waiting for Claude's closing remark.
     on_process(proc): called with the Popen handle for this command's Claude
         CLI subprocess as soon as it's launched, so the caller can forcibly
-        cancel a long-running command (e.g. self_improve/hire_employee) that
-        would otherwise block until it finishes on its own. The subprocess is
-        started in its own process group/session specifically so a cancel can
-        take out its whole tree (it, the MCP server it spawns, and anything
-        that server itself spawns like self_improve's inner Claude Code call)
-        with one signal, not just the top-level process.
+        cancel a long-running command that would otherwise block until it
+        finishes on its own. The subprocess is started in its own process
+        group/session specifically so a cancel can take out its whole tree
+        (it and the MCP server it spawns) with one signal, not just the
+        top-level process.
 
     Returns the final text to speak, or None if the brain couldn't be
     reached at all (caller should fall back to local chat-only Ollama).
@@ -189,8 +145,6 @@ def run_agent(command, on_activity=None, on_creation=None, on_process=None, chan
         pass
 
     parts = [now_line]
-    if channel_hint:
-        parts.append(channel_hint)
     if memory_block:
         parts.append(memory_block)
     if history:
@@ -233,7 +187,6 @@ def run_agent(command, on_activity=None, on_creation=None, on_process=None, chan
     killer.daemon = True
     killer.start()
 
-    tool_calls = {}  # tool_use_id -> (name, input)
     final_text = None
 
     try:
@@ -255,33 +208,9 @@ def run_agent(command, on_activity=None, on_creation=None, on_process=None, chan
                     if block.get("type") != "tool_use":
                         continue
                     tid, tname, targs = block.get("id"), block.get("name", ""), block.get("input", {}) or {}
-                    tool_calls[tid] = (tname, targs)
                     if on_activity:
                         try:
                             on_activity(_caption_for(tname, targs, meta_by_id.get(tid)))
-                        except Exception:
-                            pass
-
-            elif etype == "user":
-                for block in event.get("message", {}).get("content", []) or []:
-                    if block.get("type") != "tool_result":
-                        continue
-                    tname, _targs = tool_calls.get(block.get("tool_use_id"), ("", {}))
-                    # build_finance_dashboard returns build_creation's exact
-                    # payload shape (it just calls build_creation internally
-                    # with real spending data folded into the prompt), so the
-                    # live HUD creation panel should pop for it too.
-                    if tname.split("__")[-1] not in ("build_creation", "build_finance_dashboard") or not on_creation:
-                        continue
-                    structured = ((event.get("tool_use_result") or {}).get("structuredContent")) or {}
-                    raw = structured.get("result")
-                    try:
-                        payload = json.loads(raw) if isinstance(raw, str) else raw
-                    except Exception:
-                        payload = None
-                    if payload and payload.get("ok"):
-                        try:
-                            on_creation(payload)
                         except Exception:
                             pass
 

@@ -1,17 +1,11 @@
 # ================================================================
 #   tts_service — shared server-side edge-tts synthesis.
 #
-#   Extracted out of jarvis.py so dashboard_server.py can generate the
-#   exact same voice for the phone HUD's camera Q&A (see _hud_ask in
-#   dashboard_server.py) without importing jarvis.py itself, which would
-#   be a circular import (jarvis.py already imports dashboard_server.py
-#   to register its command/frame/gesture handlers).
-#
-#   jarvis.py's own speak() (desktop voice, played locally through this
-#   PC's speakers via pygame) and dashboard_server.py's HUD audio route
-#   (served to the phone as an actual audio file) both call
-#   synthesize_to_file() here -- one voice, one implementation, two
-#   playback destinations.
+#   Extracted out of jarvis.py so any other module (a phone-facing web
+#   server, a second bot, etc.) can generate the exact same voice without
+#   importing jarvis.py itself. jarvis.py's own speak() (desktop voice,
+#   played locally through this PC's speakers via pygame) calls
+#   synthesize_to_file() here.
 # ================================================================
 import asyncio
 import re
