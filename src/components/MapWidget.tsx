@@ -28,11 +28,11 @@ interface MapWidgetProps {
   onClose: () => void;
 }
 
-// Bethel, CT -- same default the Weather widget already centers on
-// (see WeatherWidget.tsx), so a freshly-opened map widget lines up with
-// what the weather widget is already showing instead of some unrelated
-// arbitrary spot.
-const DEFAULT_TARGET: MapTarget = { lat: 41.3712, lon: -73.4140, name: "Bethel, CT" };
+// Same default the Weather widget centers on (see the LAT/LON/LOCATION_LABEL
+// constants at the top of WeatherWidget.tsx -- edit both files together), so
+// a freshly-opened map widget lines up with what the weather widget is
+// already showing instead of some unrelated arbitrary spot.
+const DEFAULT_TARGET: MapTarget = { lat: 34.0522, lon: -118.2437, name: "Los Angeles, CA" };
 
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY as string | undefined;
 // Real vector dark style either way (crisp glowing roads/labels from

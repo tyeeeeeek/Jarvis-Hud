@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
 // ─── Edit these to your location ──────────────────────────────────────────
-const LAT = 41.3712;
-const LON = -73.4140;
-const LOCATION_LABEL = "BETHEL, CT";
+const LAT = 34.0522;
+const LON = -118.2437;
+const LOCATION_LABEL = "LOS ANGELES, CA";
 
 const WMO: Record<number, string> = {
   0: "CLEAR SKY", 1: "MAINLY CLEAR", 2: "PARTLY CLOUDY", 3: "OVERCAST",

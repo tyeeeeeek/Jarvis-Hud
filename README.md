@@ -160,7 +160,9 @@ const LOCATION_LABEL = "LOS ANGELES, CA";
 ```
 
 Replace with your own latitude/longitude (search "[your city] latitude longitude" to
-find these easily) and a label to display.
+find these easily) and a label to display. `src/components/MapWidget.tsx` has its
+own matching `DEFAULT_TARGET` a few lines down (`lat`/`lon`/`name`) -- update it
+to the same coordinates so the map widget opens centered on your area too.
 
 ## 4. Make sure Ollama is running
 
