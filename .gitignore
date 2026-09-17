@@ -9,10 +9,7 @@ credentials.json
 credentials.json.*
 *.bak
 .env
-.jarvis_key
-plaid_store.enc
 .DS_Store
 .jarvis/
 .jarvis-browser-profile/
 .jarvis-browser-profile-alt/
-statements_ledger.json
